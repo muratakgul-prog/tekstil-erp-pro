@@ -5,18 +5,21 @@ Tekstil üretimi için uçtan uca sipariş, reçete, malzeme tedariği ve maliye
 ## ✨ Özellikler
 
 - **Kullanıcı yönetimi**: Admin / kullanıcı rolleri, şifreli giriş.
-- **Reçete kütüphanesi**: Cinsiyet + Ürün Grubu + Beden bazında kumaş (gr) ve lastik (adet/mt) reçetesi — yeni siparişte otomatik uygulanır.
+- **Ürün Adları**: Model isimleri (ör. "Zebra Boxer") tanımlanır; Yeni Sipariş'te seçildiğinde cinsiyet ve ürün grubu otomatik dolar.
+- **Reçete kütüphanesi**: Cinsiyet + Ürün Grubu + Beden bazında kumaş (gr) ve lastik (adet/cm) reçetesi — yeni siparişte otomatik uygulanır, düzenlenebilir/silinebilir.
 - **Ürün grupları**: Kadın (string, cheeky, slip, boyshort, short, pantolon, triangle bra) ve Erkek (boxer, slip, short, pantolon) için ayrı ayrı tanımlanabilir.
-- **Kumaş & Lastik ana verisi**: İçerik, en, gr/m², kumaş türü (Örme/Dokuma), lastik türü (Baskılı/Jakarlı/Raporlu), boyut ve fiyat bilgileri.
-- **4 adımlı sipariş sihirbazı**: Temel Bilgiler → Sipariş Adedi (beden bazlı) → Kumaş/Lastik/Aksesuar → Onay.
+- **Kumaş & Lastik ana verisi**: Kumaş türü (Örme/Dokuma), lastik adı (Baskılı/Jakarlı/Raporlu Lastik), boyut, ürün adı bağlantısı.
+- **4 adımlı sipariş sihirbazı**: Temel Bilgiler → Sipariş Adedi (beden bazlı) → Kumaş/Lastik/Aksesuar (birbirinden bağımsız, dinamik satırlar) → Onay.
+- **Kumaş, Lastik, Aksesuar birbirinden tamamen bağımsız**: Her biri varsayılan 1 satırla başlar, "+ Satır Ekle" ile farklı renk/malzeme kullanıldığında çoğaltılabilir.
+- **Raporlu Lastik seçiminde otomatik adet takibi**, Baskılı/Jakarlı lastikte cm takibi.
 - **Üretici ataması sadece düzenleme sayfasında**: "Tüm süreçlerle ilgilenecek" işaretlenirse kumaş/lastik/aksesuar otomatik o üreticiye atanır ve tamamlandı sayılır.
-- **Kumaş & Kutu tedarik takibi**: Gerekli/Sipariş/Gelen/Kalan miktar, sipariş/termin tarihi, gün bazlı renk kodlama (15+ gün yeşil, 1-14 turuncu, 0/geçmiş kırmızı).
-- **Maliyet & Kârlılık**: Döviz kuru (USD/EUR), işçilik, genel gider %, kâr marjı % ile otomatik birim/toplam maliyet ve satış fiyatı hesaplama.
-- **İrsaliye + PDF**: Kumaş/Lastik/Kutu/Aksesuar için gelen mal kaydı ve indirilebilir PDF irsaliye.
-- **Barkod / Model Kodu**: Ayarlar'daki prefix ile otomatik `PREFIX-001-RENK` formatında model kodu.
+- **Kumaş, Lastik, Aksesuar & Kutu tedarik takibi**: Gerekli/Sipariş/Gelen/Kalan miktar, sipariş/termin tarihi, gün bazlı renk kodlama (15+ gün yeşil, 1-14 turuncu, 0/geçmiş kırmızı).
+- **İrsaliye + PDF**: Kumaş/Lastik/Kutu/Aksesuar için gelen mal kaydı girildiğinde kalan miktar otomatik düşer; PDF irsaliye indirilebilir.
 - **Fotoğraf yükleme**: Ürün, kumaş, lastik, aksesuar için ayrı ayrı görsel.
 - **Excel içe/dışa aktarma** ve **tam sistem yedeği (zip)**.
 - **Dashboard**: Aktif/Atanmış/Planlama Bekleyen/Acil/Toplam sipariş sayıları + yıllık tamamlanan sipariş özeti.
+- **Sipariş kartları**: Toplam Adet, Toplam Kutu, Kumaş, Lastik kutucukları — tamamlanma ve termin durumuna göre yeşil/sarı/kırmızı, hafif gölgeli.
+- **Türkçe tarih formatı** (GG.AA.YYYY) tüm ekranlarda.
 
 ## 🔐 Varsayılan Giriş
 

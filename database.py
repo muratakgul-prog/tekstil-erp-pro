@@ -1,13 +1,12 @@
 import sqlite3
 import hashlib
 import os
-import math
 from datetime import datetime
 
 from constants import (
     ASSIGNMENT_FULL_SERVICE, ASSIGNMENT_PARTIAL, ASSIGNMENT_UNPLANNED,
     MATERIAL_STATUS_DONE, MATERIAL_STATUS_PENDING, MATERIAL_STATUS_NA,
-    SIZES, CLOSED_STATUSES,
+    SIZES, RAPORLU_LASTIK,
 )
 
 DB_PATH = os.path.join(os.path.dirname(__file__), 'app_data.db')
@@ -25,6 +24,15 @@ def _add_column_if_missing(conn, table, column, coltype_default):
     cols = [r['name'] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
     if column not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype_default}")
+
+
+def _rename_column_if_exists(conn, table, old, new):
+    cols = [r['name'] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if old in cols and new not in cols:
+        try:
+            conn.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
+        except sqlite3.OperationalError:
+            pass
 
 
 def init_db():
@@ -60,6 +68,15 @@ def init_db():
         UNIQUE(gender, name)
     )''')
 
+    # Ürün adları (belirli model isimleri; cinsiyet + ürün grubunu otomatik taşır)
+    c.execute('''CREATE TABLE IF NOT EXISTS product_names (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE NOT NULL,
+        gender TEXT NOT NULL,
+        urun_grubu TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )''')
+
     # Kumaş ana verisi
     c.execute('''CREATE TABLE IF NOT EXISTS fabrics (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,36 +85,34 @@ def init_db():
         kumas_turu TEXT DEFAULT 'Örme',
         en REAL DEFAULT 0,
         gr_m2 REAL DEFAULT 0,
-        fiyat REAL DEFAULT 0,
-        created_at TEXT NOT NULL
+        urun_adi_id INTEGER,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (urun_adi_id) REFERENCES product_names(id)
     )''')
 
-    # Lastik ana verisi
+    # Lastik ana verisi (Baskılı Lastik / Jakarlı Lastik / Raporlu Lastik)
     c.execute('''CREATE TABLE IF NOT EXISTS elastics (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         tur TEXT NOT NULL,
         ad TEXT NOT NULL,
         boyut TEXT DEFAULT '',
-        urun_grubu TEXT DEFAULT '',
-        fiyat REAL DEFAULT 0,
-        created_at TEXT NOT NULL
+        urun_adi_id INTEGER,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (urun_adi_id) REFERENCES product_names(id)
     )''')
 
-    # Uygulama ayarları (kur, firma, barkod prefix) - tek satır (id=1)
+    # Uygulama ayarları
     c.execute('''CREATE TABLE IF NOT EXISTS app_settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
-        usd_kur REAL DEFAULT 34.5,
-        eur_kur REAL DEFAULT 37.2,
-        varsayilan_para TEXT DEFAULT 'TL',
-        firma_adi TEXT DEFAULT 'Tekstil Ltd',
-        barkod_prefix TEXT DEFAULT 'TXT'
+        firma_adi TEXT DEFAULT 'Tekstil Ltd'
     )''')
 
-    # İrsaliyeler (gelen mal kayıtları)
+    # İrsaliyeler (gelen mal kayıtları) - item_id, kategoriye göre order_fabrics / order_elastics /
+    # order_accessories / (Kutu için NULL, order_id yeterli) tablosundaki satırı işaret eder.
     c.execute('''CREATE TABLE IF NOT EXISTS irsaliyeler (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         order_id INTEGER NOT NULL,
-        color_id INTEGER,
+        item_id INTEGER,
         kategori TEXT NOT NULL,
         irsaliye_no TEXT DEFAULT '',
         tedarikci TEXT DEFAULT '',
@@ -109,7 +124,7 @@ def init_db():
         FOREIGN KEY (order_id) REFERENCES orders(id)
     )''')
 
-    # Reçete kütüphanesi: cinsiyet + ürün grubu + beden -> kumaş/lastik reçetesi
+    # Reçete kütüphanesi: cinsiyet + ürün grubu + beden -> kumaş(gr)/lastik(adet, cm) reçetesi
     c.execute('''CREATE TABLE IF NOT EXISTS recipes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         gender TEXT NOT NULL,
@@ -117,7 +132,7 @@ def init_db():
         size TEXT NOT NULL,
         kumas_gr REAL DEFAULT 0,
         lastik_adet REAL DEFAULT 0,
-        lastik_mt REAL DEFAULT 0,
+        lastik_cm REAL DEFAULT 0,
         created_at TEXT NOT NULL,
         UNIQUE(gender, urun_grubu, size)
     )''')
@@ -134,19 +149,13 @@ def init_db():
         kumas_fire_orani REAL NOT NULL DEFAULT 3,
         lastik_fire_orani REAL NOT NULL DEFAULT 3,
         deadline TEXT,
+        siparis_tarihi TEXT DEFAULT '',
         total_quantity INTEGER DEFAULT 0,
         total_boxes INTEGER DEFAULT 0,
         status TEXT DEFAULT 'Planlama',
         urun_foto TEXT DEFAULT '',
-        model_kodu TEXT DEFAULT '',
-
-        para_birimi TEXT DEFAULT 'TL',
-        iscilik_birim REAL DEFAULT 0,
-        genel_gider_yuzde REAL DEFAULT 10,
-        kar_yuzde REAL DEFAULT 30,
 
         kutu_manufacturer_id INTEGER,
-        kutu_fiyat REAL DEFAULT 0,
         kutu_siparis_adet REAL DEFAULT 0,
         kutu_gelen_adet REAL DEFAULT 0,
         kutu_siparis_tarihi TEXT DEFAULT '',
@@ -167,17 +176,15 @@ def init_db():
         box_qty INTEGER NOT NULL DEFAULT 0,
         kumas_gr REAL NOT NULL DEFAULT 0,
         lastik_adet REAL NOT NULL DEFAULT 0,
-        lastik_mt REAL NOT NULL DEFAULT 0,
+        lastik_cm REAL NOT NULL DEFAULT 0,
         FOREIGN KEY (order_id) REFERENCES orders(id)
     )''')
 
-    # Paket içi renkler / malzeme detayları
-    c.execute('''CREATE TABLE IF NOT EXISTS order_colors (
+    # --- Kumaş / Lastik / Aksesuar artık BİRBİRİNDEN BAĞIMSIZ satır listeleri ---
+    c.execute('''CREATE TABLE IF NOT EXISTS order_fabrics (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         order_id INTEGER NOT NULL,
         seq INTEGER NOT NULL DEFAULT 1,
-        color_name TEXT NOT NULL DEFAULT '',
-
         kumas_fabric_id INTEGER,
         kumas_renk TEXT DEFAULT '',
         kumas_foto TEXT DEFAULT '',
@@ -186,31 +193,43 @@ def init_db():
         kumas_gelen_kg REAL DEFAULT 0,
         kumas_siparis_tarihi TEXT DEFAULT '',
         kumas_termin_tarihi TEXT DEFAULT '',
+        FOREIGN KEY (order_id) REFERENCES orders(id),
+        FOREIGN KEY (kumas_fabric_id) REFERENCES fabrics(id),
+        FOREIGN KEY (kumas_manufacturer_id) REFERENCES manufacturers(id)
+    )''')
 
+    c.execute('''CREATE TABLE IF NOT EXISTS order_elastics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id INTEGER NOT NULL,
+        seq INTEGER NOT NULL DEFAULT 1,
         lastik_elastic_id INTEGER,
         lastik_renk TEXT DEFAULT '',
         lastik_foto TEXT DEFAULT '',
         lastik_manufacturer_id INTEGER,
-        lastik_siparis_mt REAL DEFAULT 0,
-        lastik_gelen_mt REAL DEFAULT 0,
+        lastik_siparis_cm REAL DEFAULT 0,
+        lastik_gelen_cm REAL DEFAULT 0,
+        lastik_siparis_adet REAL DEFAULT 0,
+        lastik_gelen_adet REAL DEFAULT 0,
         lastik_siparis_tarihi TEXT DEFAULT '',
         lastik_termin_tarihi TEXT DEFAULT '',
+        FOREIGN KEY (order_id) REFERENCES orders(id),
+        FOREIGN KEY (lastik_elastic_id) REFERENCES elastics(id),
+        FOREIGN KEY (lastik_manufacturer_id) REFERENCES manufacturers(id)
+    )''')
 
+    c.execute('''CREATE TABLE IF NOT EXISTS order_accessories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id INTEGER NOT NULL,
+        seq INTEGER NOT NULL DEFAULT 1,
         aksesuar_adi TEXT DEFAULT '',
         aksesuar_renk TEXT DEFAULT '',
         aksesuar_foto TEXT DEFAULT '',
         aksesuar_manufacturer_id INTEGER,
-        aksesuar_fiyat REAL DEFAULT 0,
         aksesuar_siparis_adet REAL DEFAULT 0,
         aksesuar_gelen_adet REAL DEFAULT 0,
         aksesuar_siparis_tarihi TEXT DEFAULT '',
         aksesuar_termin_tarihi TEXT DEFAULT '',
-
         FOREIGN KEY (order_id) REFERENCES orders(id),
-        FOREIGN KEY (kumas_fabric_id) REFERENCES fabrics(id),
-        FOREIGN KEY (lastik_elastic_id) REFERENCES elastics(id),
-        FOREIGN KEY (kumas_manufacturer_id) REFERENCES manufacturers(id),
-        FOREIGN KEY (lastik_manufacturer_id) REFERENCES manufacturers(id),
         FOREIGN KEY (aksesuar_manufacturer_id) REFERENCES manufacturers(id)
     )''')
 
@@ -227,53 +246,25 @@ def init_db():
 
     conn.commit()
 
-    # --- Migrasyonlar: eski şemalarda eksik kolonları ekle ---
+    # --- Eski şemadan (varsa) rename/migrasyon ---
+    _rename_column_if_exists(conn, 'recipes', 'lastik_mt', 'lastik_cm')
+    _rename_column_if_exists(conn, 'order_sizes', 'lastik_mt', 'lastik_cm')
+    conn.commit()
+
     migrations = [
         ('manufacturers', 'contact_person', "TEXT DEFAULT ''"),
         ('manufacturers', 'phone', "TEXT DEFAULT ''"),
         ('manufacturers', 'email', "TEXT DEFAULT ''"),
         ('orders', 'urun_grubu', "TEXT DEFAULT ''"),
-        ('orders', 'kumas_fire_orani', "REAL NOT NULL DEFAULT 3"),
-        ('orders', 'lastik_fire_orani', "REAL NOT NULL DEFAULT 3"),
-        ('orders', 'urun_foto', "TEXT DEFAULT ''"),
-        ('orders', 'gender', "TEXT NOT NULL DEFAULT 'Kadın'"),
-        ('orders', 'assignment_type', "TEXT NOT NULL DEFAULT 'planlama'"),
-        ('orders', 'package_size', "INTEGER NOT NULL DEFAULT 1"),
-        ('orders', 'total_boxes', "INTEGER DEFAULT 0"),
-        ('order_colors', 'kumas_fabric_id', "INTEGER"),
-        ('order_colors', 'kumas_renk', "TEXT DEFAULT ''"),
-        ('order_colors', 'kumas_foto', "TEXT DEFAULT ''"),
-        ('order_colors', 'kumas_siparis_kg', "REAL DEFAULT 0"),
-        ('order_colors', 'kumas_gelen_kg', "REAL DEFAULT 0"),
-        ('order_colors', 'kumas_siparis_tarihi', "TEXT DEFAULT ''"),
-        ('order_colors', 'kumas_termin_tarihi', "TEXT DEFAULT ''"),
-        ('order_colors', 'lastik_elastic_id', "INTEGER"),
-        ('order_colors', 'lastik_renk', "TEXT DEFAULT ''"),
-        ('order_colors', 'lastik_foto', "TEXT DEFAULT ''"),
-        ('order_colors', 'aksesuar_foto', "TEXT DEFAULT ''"),
-        ('fabrics', 'kumas_turu', "TEXT DEFAULT 'Örme'"),
-        ('fabrics', 'fiyat', "REAL DEFAULT 0"),
-        ('elastics', 'fiyat', "REAL DEFAULT 0"),
-        ('orders', 'model_kodu', "TEXT DEFAULT ''"),
-        ('orders', 'para_birimi', "TEXT DEFAULT 'TL'"),
-        ('orders', 'iscilik_birim', "REAL DEFAULT 0"),
-        ('orders', 'genel_gider_yuzde', "REAL DEFAULT 10"),
-        ('orders', 'kar_yuzde', "REAL DEFAULT 30"),
+        ('orders', 'siparis_tarihi', "TEXT DEFAULT ''"),
         ('orders', 'kutu_manufacturer_id', "INTEGER"),
-        ('orders', 'kutu_fiyat', "REAL DEFAULT 0"),
         ('orders', 'kutu_siparis_adet', "REAL DEFAULT 0"),
         ('orders', 'kutu_gelen_adet', "REAL DEFAULT 0"),
         ('orders', 'kutu_siparis_tarihi', "TEXT DEFAULT ''"),
         ('orders', 'kutu_termin_tarihi', "TEXT DEFAULT ''"),
-        ('order_colors', 'lastik_siparis_mt', "REAL DEFAULT 0"),
-        ('order_colors', 'lastik_gelen_mt', "REAL DEFAULT 0"),
-        ('order_colors', 'lastik_siparis_tarihi', "TEXT DEFAULT ''"),
-        ('order_colors', 'lastik_termin_tarihi', "TEXT DEFAULT ''"),
-        ('order_colors', 'aksesuar_fiyat', "REAL DEFAULT 0"),
-        ('order_colors', 'aksesuar_siparis_adet', "REAL DEFAULT 0"),
-        ('order_colors', 'aksesuar_gelen_adet', "REAL DEFAULT 0"),
-        ('order_colors', 'aksesuar_siparis_tarihi', "TEXT DEFAULT ''"),
-        ('order_colors', 'aksesuar_termin_tarihi', "TEXT DEFAULT ''"),
+        ('fabrics', 'kumas_turu', "TEXT DEFAULT 'Örme'"),
+        ('fabrics', 'urun_adi_id', "INTEGER"),
+        ('elastics', 'urun_adi_id', "INTEGER"),
     ]
     for table, col, definition in migrations:
         try:
@@ -285,8 +276,7 @@ def init_db():
     # Varsayılan ayarlar satırı
     c.execute("SELECT COUNT(*) FROM app_settings WHERE id = 1")
     if c.fetchone()[0] == 0:
-        c.execute('''INSERT INTO app_settings (id, usd_kur, eur_kur, varsayilan_para, firma_adi, barkod_prefix)
-                     VALUES (1, 34.5, 37.2, 'TL', 'Paul Kenzie', 'PK')''')
+        c.execute("INSERT INTO app_settings (id, firma_adi) VALUES (1, 'Paul Kenzie')")
         conn.commit()
 
     # Varsayılan admin kullanıcı
@@ -340,31 +330,21 @@ def get_logs(limit=200):
     return rows
 
 
-# --- Ayarlar (kur, firma, barkod) ---
+# --- Ayarlar (firma adı) ---
 def get_settings():
     conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT * FROM app_settings WHERE id = 1")
     row = c.fetchone()
     conn.close()
-    return dict(row) if row else {
-        'usd_kur': 34.5, 'eur_kur': 37.2, 'varsayilan_para': 'TL',
-        'firma_adi': 'Tekstil Ltd', 'barkod_prefix': 'TXT',
-    }
+    return dict(row) if row else {'firma_adi': 'Tekstil Ltd'}
 
 
-def update_settings(usd_kur, eur_kur, varsayilan_para, firma_adi, barkod_prefix):
+def update_settings(firma_adi):
     conn = get_conn()
-    conn.execute('''UPDATE app_settings SET usd_kur=?, eur_kur=?, varsayilan_para=?,
-                    firma_adi=?, barkod_prefix=? WHERE id=1''',
-                (usd_kur, eur_kur, varsayilan_para, firma_adi, barkod_prefix))
+    conn.execute("UPDATE app_settings SET firma_adi=? WHERE id=1", (firma_adi,))
     conn.commit()
     conn.close()
-
-
-def generate_model_code(barkod_prefix, order_id, renk=''):
-    renk_kod = ''.join([ch for ch in (renk or '').upper() if ch.isalnum()])[:2] or 'XX'
-    return f"{barkod_prefix}-{order_id:03d}-{renk_kod}"
 
 
 # --- Manufacturers ---
@@ -439,21 +419,86 @@ def delete_product_group(pg_id):
     conn.close()
 
 
-# --- Fabrics (kumaş ana verisi) ---
-def get_fabrics():
+# --- Product names (ürün adları: model ismi + cinsiyet + ürün grubu) ---
+def get_product_names(gender=None):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT * FROM fabrics ORDER BY name")
+    if gender:
+        c.execute("SELECT * FROM product_names WHERE gender = ? ORDER BY name", (gender,))
+    else:
+        c.execute("SELECT * FROM product_names ORDER BY name")
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
 
 
-def add_fabric(name, icerik, kumas_turu, en, gr_m2):
+def get_product_name_by_name(name):
     conn = get_conn()
-    conn.execute('''INSERT INTO fabrics (name, icerik, kumas_turu, en, gr_m2, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)''',
-                 (name, icerik, kumas_turu, en, gr_m2, datetime.now().isoformat()))
+    c = conn.cursor()
+    c.execute("SELECT * FROM product_names WHERE name = ?", (name,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def add_product_name(name, gender, urun_grubu):
+    conn = get_conn()
+    try:
+        conn.execute("INSERT INTO product_names (name, gender, urun_grubu, created_at) VALUES (?, ?, ?, ?)",
+                     (name, gender, urun_grubu, datetime.now().isoformat()))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+
+def update_product_name(pn_id, name, gender, urun_grubu):
+    conn = get_conn()
+    try:
+        conn.execute("UPDATE product_names SET name=?, gender=?, urun_grubu=? WHERE id=?",
+                     (name, gender, urun_grubu, pn_id))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+
+def delete_product_name(pn_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM product_names WHERE id = ?", (pn_id,))
+    conn.commit()
+    conn.close()
+
+
+# --- Fabrics (kumaş ana verisi) ---
+def get_fabrics():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute('''SELECT f.*, p.name as urun_adi FROM fabrics f
+                 LEFT JOIN product_names p ON f.urun_adi_id = p.id
+                 ORDER BY f.name''')
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+def add_fabric(name, icerik, kumas_turu, en, gr_m2, urun_adi_id=None):
+    conn = get_conn()
+    conn.execute('''INSERT INTO fabrics (name, icerik, kumas_turu, en, gr_m2, urun_adi_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                 (name, icerik, kumas_turu, en, gr_m2, urun_adi_id, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def update_fabric(fabric_id, name, icerik, kumas_turu, en, gr_m2, urun_adi_id=None):
+    conn = get_conn()
+    conn.execute('''UPDATE fabrics SET name=?, icerik=?, kumas_turu=?, en=?, gr_m2=?, urun_adi_id=?
+                    WHERE id=?''', (name, icerik, kumas_turu, en, gr_m2, urun_adi_id, fabric_id))
     conn.commit()
     conn.close()
 
@@ -469,17 +514,27 @@ def delete_fabric(fabric_id):
 def get_elastics():
     conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT * FROM elastics ORDER BY tur, ad")
+    c.execute('''SELECT e.*, p.name as urun_adi FROM elastics e
+                 LEFT JOIN product_names p ON e.urun_adi_id = p.id
+                 ORDER BY e.tur, e.boyut''')
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
     return rows
 
 
-def add_elastic(tur, ad, boyut, urun_grubu=''):
+def add_elastic(tur, boyut, urun_adi_id=None):
     conn = get_conn()
-    conn.execute('''INSERT INTO elastics (tur, ad, boyut, urun_grubu, created_at)
+    conn.execute('''INSERT INTO elastics (tur, ad, boyut, urun_adi_id, created_at)
                     VALUES (?, ?, ?, ?, ?)''',
-                 (tur, ad, boyut, urun_grubu, datetime.now().isoformat()))
+                 (tur, tur, boyut, urun_adi_id, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def update_elastic(elastic_id, tur, boyut, urun_adi_id=None):
+    conn = get_conn()
+    conn.execute("UPDATE elastics SET tur=?, ad=?, boyut=?, urun_adi_id=? WHERE id=?",
+                (tur, tur, boyut, urun_adi_id, elastic_id))
     conn.commit()
     conn.close()
 
@@ -501,38 +556,26 @@ def get_recipe_groups():
     return rows
 
 
-def get_urun_gruplari_with_recipe(gender=None):
-    conn = get_conn()
-    c = conn.cursor()
-    if gender:
-        c.execute("SELECT DISTINCT urun_grubu FROM recipes WHERE gender = ? ORDER BY urun_grubu", (gender,))
-    else:
-        c.execute("SELECT DISTINCT urun_grubu FROM recipes ORDER BY urun_grubu")
-    rows = [r['urun_grubu'] for r in c.fetchall()]
-    conn.close()
-    return rows
-
-
 def get_recipe(gender, urun_grubu):
     conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT * FROM recipes WHERE gender = ? AND urun_grubu = ?", (gender, urun_grubu))
     rows = [dict(r) for r in c.fetchall()]
     conn.close()
-    result = {s: {'kumas_gr': 0, 'lastik_adet': 0, 'lastik_mt': 0} for s in SIZES}
+    result = {s: {'kumas_gr': 0, 'lastik_adet': 0, 'lastik_cm': 0} for s in SIZES}
     for r in rows:
-        result[r['size']] = {'kumas_gr': r['kumas_gr'], 'lastik_adet': r['lastik_adet'], 'lastik_mt': r['lastik_mt']}
+        result[r['size']] = {'kumas_gr': r['kumas_gr'], 'lastik_adet': r['lastik_adet'], 'lastik_cm': r['lastik_cm']}
     return result
 
 
-def upsert_recipe(gender, urun_grubu, size, kumas_gr, lastik_adet, lastik_mt):
+def upsert_recipe(gender, urun_grubu, size, kumas_gr, lastik_adet, lastik_cm):
     conn = get_conn()
-    conn.execute('''INSERT INTO recipes (gender, urun_grubu, size, kumas_gr, lastik_adet, lastik_mt, created_at)
+    conn.execute('''INSERT INTO recipes (gender, urun_grubu, size, kumas_gr, lastik_adet, lastik_cm, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(gender, urun_grubu, size)
                     DO UPDATE SET kumas_gr = excluded.kumas_gr, lastik_adet = excluded.lastik_adet,
-                                  lastik_mt = excluded.lastik_mt''',
-                 (gender, urun_grubu, size, kumas_gr, lastik_adet, lastik_mt, datetime.now().isoformat()))
+                                  lastik_cm = excluded.lastik_cm''',
+                 (gender, urun_grubu, size, kumas_gr, lastik_adet, lastik_cm, datetime.now().isoformat()))
     conn.commit()
     conn.close()
 
@@ -593,17 +636,15 @@ def delete_user(user_id):
 
 # --- Orders ---
 def add_order(model_name, gender, urun_grubu, package_size,
-              kumas_fire_orani, lastik_fire_orani, deadline, sizes, colors, user_id, urun_foto='',
-              para_birimi='TL', iscilik_birim=0, genel_gider_yuzde=10, kar_yuzde=30,
-              kutu_manufacturer_id=None, kutu_fiyat=0):
+              kumas_fire_orani, lastik_fire_orani, deadline, siparis_tarihi, sizes,
+              fabrics, elastics, accessories, user_id, urun_foto=''):
     """
     Yeni sipariş her zaman 'Planlama Bekleyen' (manufacturer_id=None) olarak oluşturulur.
-    Üretici ataması sadece sipariş düzenleme sayfasında yapılır.
 
-    sizes:  [{'size': 'M', 'box_qty': 10, 'kumas_gr': 150, 'lastik_adet': 2, 'lastik_mt': 0.5}, ...]
-    colors: [{'color_name':.., 'kumas_fabric_id':.., 'kumas_renk':.., 'kumas_foto':..,
-              'lastik_elastic_id':.., 'lastik_renk':.., 'lastik_foto':..,
-              'aksesuar_adi':.., 'aksesuar_renk':.., 'aksesuar_foto':..}, ...]
+    sizes: [{'size': 'M', 'box_qty': 10, 'kumas_gr': 150, 'lastik_adet': 2, 'lastik_cm': 50}, ...]
+    fabrics: [{'kumas_fabric_id':.., 'kumas_renk':.., 'kumas_foto':..}, ...]  (en az 1 satır)
+    elastics: [{'lastik_elastic_id':.., 'lastik_renk':.., 'lastik_foto':..}, ...]  (en az 1 satır)
+    accessories: [{'aksesuar_adi':.., 'aksesuar_renk':.., 'aksesuar_foto':..}, ...]  (0 veya daha fazla)
     """
     conn = get_conn()
     c = conn.cursor()
@@ -613,48 +654,46 @@ def add_order(model_name, gender, urun_grubu, package_size,
 
     c.execute('''INSERT INTO orders
                  (model_name, gender, urun_grubu, manufacturer_id, assignment_type, package_size,
-                  kumas_fire_orani, lastik_fire_orani, deadline, total_quantity, total_boxes, status,
-                  urun_foto, para_birimi, iscilik_birim, genel_gider_yuzde, kar_yuzde,
-                  kutu_manufacturer_id, kutu_fiyat, kutu_siparis_adet,
-                  created_at, created_by)
-                 VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'Planlama', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                  kumas_fire_orani, lastik_fire_orani, deadline, siparis_tarihi,
+                  total_quantity, total_boxes, status, urun_foto, created_at, created_by)
+                 VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'Planlama', ?, ?, ?)''',
               (model_name, gender, urun_grubu, ASSIGNMENT_UNPLANNED, package_size,
-               kumas_fire_orani, lastik_fire_orani, deadline, total_quantity, total_boxes,
-               urun_foto, para_birimi, iscilik_birim, genel_gider_yuzde, kar_yuzde,
-               kutu_manufacturer_id, kutu_fiyat, math.ceil(total_quantity / package_size) if package_size else total_boxes,
-               datetime.now().isoformat(), user_id))
+               kumas_fire_orani, lastik_fire_orani, deadline, siparis_tarihi,
+               total_quantity, total_boxes, urun_foto, datetime.now().isoformat(), user_id))
     order_id = c.lastrowid
-
-    # Ayarlar'daki barkod prefix ile model kodu oluştur
-    settings = c.execute("SELECT barkod_prefix FROM app_settings WHERE id=1").fetchone()
-    prefix = settings['barkod_prefix'] if settings else 'TXT'
-    ilk_renk = colors[0].get('color_name', '') if colors else ''
-    model_kodu = generate_model_code(prefix, order_id, ilk_renk)
-    c.execute("UPDATE orders SET model_kodu = ? WHERE id = ?", (model_kodu, order_id))
 
     for s in sizes:
         if s['box_qty'] > 0:
-            c.execute('''INSERT INTO order_sizes (order_id, size, box_qty, kumas_gr, lastik_adet, lastik_mt)
+            c.execute('''INSERT INTO order_sizes (order_id, size, box_qty, kumas_gr, lastik_adet, lastik_cm)
                          VALUES (?, ?, ?, ?, ?, ?)''',
                       (order_id, s['size'], s['box_qty'], s.get('kumas_gr', 0),
-                       s.get('lastik_adet', 0), s.get('lastik_mt', 0)))
+                       s.get('lastik_adet', 0), s.get('lastik_cm', 0)))
 
-    color_ids = []
-    for i, col in enumerate(colors, start=1):
-        c.execute('''INSERT INTO order_colors
-                     (order_id, seq, color_name, kumas_fabric_id, kumas_renk, kumas_foto,
-                      lastik_elastic_id, lastik_renk, lastik_foto,
-                      aksesuar_adi, aksesuar_renk, aksesuar_foto)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                  (order_id, i, col.get('color_name', f'Renk {i}'),
-                   col.get('kumas_fabric_id'), col.get('kumas_renk', ''), col.get('kumas_foto', ''),
-                   col.get('lastik_elastic_id'), col.get('lastik_renk', ''), col.get('lastik_foto', ''),
-                   col.get('aksesuar_adi', ''), col.get('aksesuar_renk', ''), col.get('aksesuar_foto', '')))
-        color_ids.append(c.lastrowid)
+    fabric_ids, elastic_ids, accessory_ids = [], [], []
+
+    for i, f in enumerate(fabrics or [{}], start=1):
+        c.execute('''INSERT INTO order_fabrics (order_id, seq, kumas_fabric_id, kumas_renk, kumas_foto)
+                     VALUES (?, ?, ?, ?, ?)''',
+                  (order_id, i, f.get('kumas_fabric_id'), f.get('kumas_renk', ''), f.get('kumas_foto', '')))
+        fabric_ids.append(c.lastrowid)
+
+    for i, el in enumerate(elastics or [{}], start=1):
+        c.execute('''INSERT INTO order_elastics (order_id, seq, lastik_elastic_id, lastik_renk, lastik_foto)
+                     VALUES (?, ?, ?, ?, ?)''',
+                  (order_id, i, el.get('lastik_elastic_id'), el.get('lastik_renk', ''), el.get('lastik_foto', '')))
+        elastic_ids.append(c.lastrowid)
+
+    for i, a in enumerate(accessories or [], start=1):
+        if not (a.get('aksesuar_adi') or '').strip():
+            continue
+        c.execute('''INSERT INTO order_accessories (order_id, seq, aksesuar_adi, aksesuar_renk, aksesuar_foto)
+                     VALUES (?, ?, ?, ?, ?)''',
+                  (order_id, i, a.get('aksesuar_adi', ''), a.get('aksesuar_renk', ''), a.get('aksesuar_foto', '')))
+        accessory_ids.append(c.lastrowid)
 
     conn.commit()
     conn.close()
-    return order_id, color_ids
+    return order_id, fabric_ids, elastic_ids, accessory_ids
 
 
 def set_order_photo(order_id, path):
@@ -664,55 +703,45 @@ def set_order_photo(order_id, path):
     conn.close()
 
 
-def set_color_photos(color_id, kumas_foto=None, lastik_foto=None, aksesuar_foto=None):
+def set_fabric_photo(fabric_row_id, path):
     conn = get_conn()
-    if kumas_foto is not None:
-        conn.execute("UPDATE order_colors SET kumas_foto = ? WHERE id = ?", (kumas_foto, color_id))
-    if lastik_foto is not None:
-        conn.execute("UPDATE order_colors SET lastik_foto = ? WHERE id = ?", (lastik_foto, color_id))
-    if aksesuar_foto is not None:
-        conn.execute("UPDATE order_colors SET aksesuar_foto = ? WHERE id = ?", (aksesuar_foto, color_id))
+    conn.execute("UPDATE order_fabrics SET kumas_foto = ? WHERE id = ?", (path, fabric_row_id))
     conn.commit()
     conn.close()
 
 
-def _material_status(material_manufacturer_id, order_manufacturer_id, has_material=True):
-    if not has_material:
-        return MATERIAL_STATUS_NA
+def set_elastic_photo(elastic_row_id, path):
+    conn = get_conn()
+    conn.execute("UPDATE order_elastics SET lastik_foto = ? WHERE id = ?", (path, elastic_row_id))
+    conn.commit()
+    conn.close()
+
+
+def set_accessory_photo(accessory_row_id, path):
+    conn = get_conn()
+    conn.execute("UPDATE order_accessories SET aksesuar_foto = ? WHERE id = ?", (path, accessory_row_id))
+    conn.commit()
+    conn.close()
+
+
+def _material_status(material_manufacturer_id, order_manufacturer_id):
     if order_manufacturer_id and material_manufacturer_id == order_manufacturer_id:
         return MATERIAL_STATUS_DONE
     return MATERIAL_STATUS_PENDING
 
 
-def _compute_order_totals(order, sizes, colors):
+def _compute_material_totals(order, sizes):
+    """Sipariş geneli toplam kumaş(kg)/lastik(adet,cm) ihtiyacı - satır sayısından bağımsız."""
     kumas_fire_mult = 1 + (order['kumas_fire_orani'] or 0) / 100.0
     lastik_fire_mult = 1 + (order['lastik_fire_orani'] or 0) / 100.0
-    total_boxes = sum(s['box_qty'] for s in sizes)
-
-    colors_out = []
-    for col in colors:
-        color_kumas_gr = sum(s['box_qty'] * s['kumas_gr'] for s in sizes) * kumas_fire_mult
-        color_lastik_adet = sum(s['box_qty'] * s['lastik_adet'] for s in sizes) * lastik_fire_mult
-        color_lastik_mt = sum(s['box_qty'] * s['lastik_mt'] for s in sizes) * lastik_fire_mult
-        has_aksesuar = bool((col.get('aksesuar_adi') or '').strip())
-
-        kumas_kg_required = round(color_kumas_gr / 1000.0, 3)
-        kumas_gelen = col.get('kumas_gelen_kg') or 0
-        kumas_kalan = round(kumas_kg_required - kumas_gelen, 3)
-
-        colors_out.append({
-            **col,
-            'pieces': total_boxes,
-            'kumas_kg': kumas_kg_required,
-            'kumas_kalan_kg': kumas_kalan,
-            'lastik_adet_toplam': round(color_lastik_adet, 1),
-            'lastik_mt_toplam': round(color_lastik_mt, 1),
-            'kumas_status': _material_status(col.get('kumas_manufacturer_id'), order['manufacturer_id']),
-            'lastik_status': _material_status(col.get('lastik_manufacturer_id'), order['manufacturer_id']),
-            'aksesuar_status': _material_status(col.get('aksesuar_manufacturer_id'), order['manufacturer_id'], has_aksesuar),
-        })
-
-    return colors_out
+    kumas_gr_total = sum(s['box_qty'] * s['kumas_gr'] for s in sizes) * kumas_fire_mult
+    lastik_adet_total = sum(s['box_qty'] * s['lastik_adet'] for s in sizes) * lastik_fire_mult
+    lastik_cm_total = sum(s['box_qty'] * s['lastik_cm'] for s in sizes) * lastik_fire_mult
+    return {
+        'kumas_kg_total': round(kumas_gr_total / 1000.0, 3),
+        'lastik_adet_total': round(lastik_adet_total, 1),
+        'lastik_cm_total': round(lastik_cm_total, 1),
+    }
 
 
 def get_order_detail(order_id):
@@ -733,27 +762,56 @@ def get_order_detail(order_id):
 
     c.execute("SELECT * FROM order_sizes WHERE order_id = ? ORDER BY id", (order_id,))
     sizes = [dict(r) for r in c.fetchall()]
-
-    c.execute('''SELECT oc.*, f.name as kumas_adi, f.icerik as kumas_icerik, f.kumas_turu as kumas_turu,
-                        f.fiyat as kumas_fiyat_kg,
-                        e.tur as lastik_tur, e.ad as lastik_adi, e.boyut as lastik_genislik,
-                        e.fiyat as lastik_fiyat_mt,
-                        km.name as kumas_manufacturer_name,
-                        lm.name as lastik_manufacturer_name, am.name as aksesuar_manufacturer_name
-                 FROM order_colors oc
-                 LEFT JOIN fabrics f ON oc.kumas_fabric_id = f.id
-                 LEFT JOIN elastics e ON oc.lastik_elastic_id = e.id
-                 LEFT JOIN manufacturers km ON oc.kumas_manufacturer_id = km.id
-                 LEFT JOIN manufacturers lm ON oc.lastik_manufacturer_id = lm.id
-                 LEFT JOIN manufacturers am ON oc.aksesuar_manufacturer_id = am.id
-                 WHERE oc.order_id = ? ORDER BY oc.seq''', (order_id,))
-    colors = [dict(r) for r in c.fetchall()]
-    conn.close()
-
     order['sizes'] = sizes
-    order['colors'] = _compute_order_totals(order, sizes, colors)
-    order['kumas_kg_total'] = round(sum(c_['kumas_kg'] for c_ in order['colors']), 3)
-    order['lastik_mt_total'] = round(sum(c_['lastik_mt_toplam'] for c_ in order['colors']), 1)
+
+    totals = _compute_material_totals(order, sizes)
+    order.update(totals)
+
+    c.execute('''SELECT ofa.*, f.name as kumas_adi, f.icerik as kumas_icerik, f.kumas_turu as kumas_turu,
+                        m.name as kumas_manufacturer_name
+                 FROM order_fabrics ofa
+                 LEFT JOIN fabrics f ON ofa.kumas_fabric_id = f.id
+                 LEFT JOIN manufacturers m ON ofa.kumas_manufacturer_id = m.id
+                 WHERE ofa.order_id = ? ORDER BY ofa.seq''', (order_id,))
+    fabric_rows = [dict(r) for r in c.fetchall()]
+    n_fab = len(fabric_rows) or 1
+    for f in fabric_rows:
+        f['kumas_kg_required'] = round(totals['kumas_kg_total'] / n_fab, 3)
+        f['kumas_kalan_kg'] = round(f['kumas_kg_required'] - (f.get('kumas_gelen_kg') or 0), 3)
+        f['kumas_status'] = _material_status(f.get('kumas_manufacturer_id'), order['manufacturer_id'])
+    order['fabrics'] = fabric_rows
+
+    c.execute('''SELECT oel.*, e.tur as lastik_tur, e.boyut as lastik_boyut,
+                        m.name as lastik_manufacturer_name
+                 FROM order_elastics oel
+                 LEFT JOIN elastics e ON oel.lastik_elastic_id = e.id
+                 LEFT JOIN manufacturers m ON oel.lastik_manufacturer_id = m.id
+                 WHERE oel.order_id = ? ORDER BY oel.seq''', (order_id,))
+    elastic_rows = [dict(r) for r in c.fetchall()]
+    n_el = len(elastic_rows) or 1
+    for e in elastic_rows:
+        is_raporlu = (e.get('lastik_tur') == RAPORLU_LASTIK)
+        e['is_raporlu'] = is_raporlu
+        e['lastik_cm_required'] = round(totals['lastik_cm_total'] / n_el, 1)
+        e['lastik_adet_required'] = round(totals['lastik_adet_total'] / n_el, 1)
+        e['lastik_cm_kalan'] = round(e['lastik_cm_required'] - (e.get('lastik_gelen_cm') or 0), 1)
+        e['lastik_adet_kalan'] = round(e['lastik_adet_required'] - (e.get('lastik_gelen_adet') or 0), 1)
+        e['lastik_status'] = _material_status(e.get('lastik_manufacturer_id'), order['manufacturer_id'])
+    order['elastics'] = elastic_rows
+
+    c.execute('''SELECT oac.*, m.name as aksesuar_manufacturer_name
+                 FROM order_accessories oac
+                 LEFT JOIN manufacturers m ON oac.aksesuar_manufacturer_id = m.id
+                 WHERE oac.order_id = ? ORDER BY oac.seq''', (order_id,))
+    accessory_rows = [dict(r) for r in c.fetchall()]
+    n_ak = len(accessory_rows) or 1
+    for a in accessory_rows:
+        a['aksesuar_adet_required'] = round((order['total_quantity'] or 0) / n_ak, 1)
+        a['aksesuar_kalan_adet'] = round(a['aksesuar_adet_required'] - (a.get('aksesuar_gelen_adet') or 0), 1)
+        a['aksesuar_status'] = _material_status(a.get('aksesuar_manufacturer_id'), order['manufacturer_id'])
+    order['accessories'] = accessory_rows
+
+    conn.close()
     return order
 
 
@@ -812,87 +870,133 @@ def get_completed_count_by_year(year):
     return count
 
 
-def compute_order_costs(order):
-    """Kur'u TL'ye çevirerek maliyet/kâr hesaplar. order = get_order_detail() çıktısı."""
-    settings = get_settings()
-    kur = {'TL': 1.0, 'USD': settings['usd_kur'], 'EUR': settings['eur_kur']}.get(order.get('para_birimi', 'TL'), 1.0)
-
-    kumas_maliyet = sum((c_['kumas_kg'] or 0) * (c_.get('kumas_fiyat_kg') or 0) for c_ in order['colors'])
-    lastik_maliyet = sum((c_['lastik_mt_toplam'] or 0) * (c_.get('lastik_fiyat_mt') or 0) for c_ in order['colors'])
-    kutu_maliyet = (order.get('kutu_fiyat') or 0) * (order.get('total_boxes') or 0)
-    aksesuar_maliyet = sum((c_['pieces'] or 0) * (c_.get('aksesuar_fiyat') or 0)
-                           for c_ in order['colors'] if (c_.get('aksesuar_adi') or '').strip())
-    iscilik_maliyet = (order.get('iscilik_birim') or 0) * (order.get('total_quantity') or 0)
-
-    malzeme_toplam = kumas_maliyet + lastik_maliyet + kutu_maliyet + aksesuar_maliyet
-    ara_toplam = malzeme_toplam + iscilik_maliyet
-    genel_gider = ara_toplam * (order.get('genel_gider_yuzde') or 0) / 100.0
-    toplam_maliyet_pb = ara_toplam + genel_gider
-    kar_pb = toplam_maliyet_pb * (order.get('kar_yuzde') or 0) / 100.0
-    satis_toplam_pb = toplam_maliyet_pb + kar_pb
-
-    qty = order.get('total_quantity') or 1
-
-    return {
-        'para_birimi': order.get('para_birimi', 'TL'),
-        'kur': kur,
-        'kumas_maliyet': round(kumas_maliyet, 2),
-        'lastik_maliyet': round(lastik_maliyet, 2),
-        'kutu_maliyet': round(kutu_maliyet, 2),
-        'aksesuar_maliyet': round(aksesuar_maliyet, 2),
-        'iscilik_maliyet': round(iscilik_maliyet, 2),
-        'toplam_maliyet_pb': round(toplam_maliyet_pb, 2),
-        'satis_toplam_pb': round(satis_toplam_pb, 2),
-        'kar_toplam_pb': round(kar_pb, 2),
-        'birim_maliyet_pb': round(toplam_maliyet_pb / qty, 2),
-        'satis_birim_pb': round(satis_toplam_pb / qty, 2),
-        'toplam_maliyet_tl': round(toplam_maliyet_pb * kur, 2),
-        'satis_toplam_tl': round(satis_toplam_pb * kur, 2),
-        'kar_toplam_tl': round(kar_pb * kur, 2),
-    }
-
-
-def update_order_kutu(order_id, kutu_manufacturer_id, kutu_fiyat, kutu_siparis_adet, kutu_gelen_adet,
+def update_order_kutu(order_id, kutu_manufacturer_id, kutu_siparis_adet, kutu_gelen_adet,
                       kutu_siparis_tarihi, kutu_termin_tarihi):
     conn = get_conn()
-    conn.execute('''UPDATE orders SET kutu_manufacturer_id=?, kutu_fiyat=?, kutu_siparis_adet=?,
+    conn.execute('''UPDATE orders SET kutu_manufacturer_id=?, kutu_siparis_adet=?,
                     kutu_gelen_adet=?, kutu_siparis_tarihi=?, kutu_termin_tarihi=? WHERE id=?''',
-                (kutu_manufacturer_id, kutu_fiyat, kutu_siparis_adet, kutu_gelen_adet,
+                (kutu_manufacturer_id, kutu_siparis_adet, kutu_gelen_adet,
                  kutu_siparis_tarihi, kutu_termin_tarihi, order_id))
     conn.commit()
     conn.close()
 
 
-def update_color_lastik_tracking(color_id, fiyat, siparis_mt, gelen_mt, siparis_tarihi, termin_tarihi):
+def update_fabric_row(fabric_row_id, kumas_fabric_id, kumas_renk, manufacturer_id,
+                      siparis_kg, gelen_kg, siparis_tarihi, termin_tarihi):
     conn = get_conn()
-    conn.execute('''UPDATE order_colors SET lastik_siparis_mt=?, lastik_gelen_mt=?,
+    conn.execute('''UPDATE order_fabrics SET kumas_fabric_id=?, kumas_renk=?, kumas_manufacturer_id=?,
+                    kumas_siparis_kg=?, kumas_gelen_kg=?, kumas_siparis_tarihi=?, kumas_termin_tarihi=?
+                    WHERE id=?''',
+                (kumas_fabric_id, kumas_renk, manufacturer_id, siparis_kg, gelen_kg,
+                 siparis_tarihi, termin_tarihi, fabric_row_id))
+    conn.commit()
+    conn.close()
+
+
+def update_elastic_row(elastic_row_id, lastik_elastic_id, lastik_renk, manufacturer_id,
+                       siparis_cm, gelen_cm, siparis_adet, gelen_adet, siparis_tarihi, termin_tarihi):
+    conn = get_conn()
+    conn.execute('''UPDATE order_elastics SET lastik_elastic_id=?, lastik_renk=?, lastik_manufacturer_id=?,
+                    lastik_siparis_cm=?, lastik_gelen_cm=?, lastik_siparis_adet=?, lastik_gelen_adet=?,
                     lastik_siparis_tarihi=?, lastik_termin_tarihi=? WHERE id=?''',
-                (siparis_mt, gelen_mt, siparis_tarihi, termin_tarihi, color_id))
-    conn.execute("UPDATE elastics SET fiyat=? WHERE id = (SELECT lastik_elastic_id FROM order_colors WHERE id=?)",
-                (fiyat, color_id))
+                (lastik_elastic_id, lastik_renk, manufacturer_id, siparis_cm, gelen_cm,
+                 siparis_adet, gelen_adet, siparis_tarihi, termin_tarihi, elastic_row_id))
     conn.commit()
     conn.close()
 
 
-def update_color_aksesuar_tracking(color_id, fiyat, siparis_adet, gelen_adet, siparis_tarihi, termin_tarihi):
+def update_accessory_row(accessory_row_id, aksesuar_adi, aksesuar_renk, manufacturer_id,
+                         siparis_adet, gelen_adet, siparis_tarihi, termin_tarihi):
     conn = get_conn()
-    conn.execute('''UPDATE order_colors SET aksesuar_fiyat=?, aksesuar_siparis_adet=?, aksesuar_gelen_adet=?,
-                    aksesuar_siparis_tarihi=?, aksesuar_termin_tarihi=? WHERE id=?''',
-                (fiyat, siparis_adet, gelen_adet, siparis_tarihi, termin_tarihi, color_id))
+    conn.execute('''UPDATE order_accessories SET aksesuar_adi=?, aksesuar_renk=?, aksesuar_manufacturer_id=?,
+                    aksesuar_siparis_adet=?, aksesuar_gelen_adet=?, aksesuar_siparis_tarihi=?,
+                    aksesuar_termin_tarihi=? WHERE id=?''',
+                (aksesuar_adi, aksesuar_renk, manufacturer_id, siparis_adet, gelen_adet,
+                 siparis_tarihi, termin_tarihi, accessory_row_id))
     conn.commit()
     conn.close()
 
 
-# --- İrsaliyeler ---
-def add_irsaliye(order_id, color_id, kategori, irsaliye_no, tedarikci, miktar, birim, gelis_tarihi, aciklama=''):
+def add_fabric_row(order_id, kumas_fabric_id='', kumas_renk=''):
     conn = get_conn()
     c = conn.cursor()
-    c.execute('''INSERT INTO irsaliyeler (order_id, color_id, kategori, irsaliye_no, tedarikci, miktar,
+    seq = c.execute("SELECT COALESCE(MAX(seq),0)+1 FROM order_fabrics WHERE order_id=?", (order_id,)).fetchone()[0]
+    c.execute("INSERT INTO order_fabrics (order_id, seq, kumas_fabric_id, kumas_renk) VALUES (?, ?, ?, ?)",
+             (order_id, seq, kumas_fabric_id or None, kumas_renk))
+    conn.commit()
+    conn.close()
+
+
+def add_elastic_row(order_id, lastik_elastic_id='', lastik_renk=''):
+    conn = get_conn()
+    c = conn.cursor()
+    seq = c.execute("SELECT COALESCE(MAX(seq),0)+1 FROM order_elastics WHERE order_id=?", (order_id,)).fetchone()[0]
+    c.execute("INSERT INTO order_elastics (order_id, seq, lastik_elastic_id, lastik_renk) VALUES (?, ?, ?, ?)",
+             (order_id, seq, lastik_elastic_id or None, lastik_renk))
+    conn.commit()
+    conn.close()
+
+
+def add_accessory_row(order_id, aksesuar_adi='', aksesuar_renk=''):
+    conn = get_conn()
+    c = conn.cursor()
+    seq = c.execute("SELECT COALESCE(MAX(seq),0)+1 FROM order_accessories WHERE order_id=?", (order_id,)).fetchone()[0]
+    c.execute("INSERT INTO order_accessories (order_id, seq, aksesuar_adi, aksesuar_renk) VALUES (?, ?, ?, ?)",
+             (order_id, seq, aksesuar_adi, aksesuar_renk))
+    conn.commit()
+    conn.close()
+
+
+def delete_fabric_row(row_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM order_fabrics WHERE id = ?", (row_id,))
+    conn.commit()
+    conn.close()
+
+
+def delete_elastic_row(row_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM order_elastics WHERE id = ?", (row_id,))
+    conn.commit()
+    conn.close()
+
+
+def delete_accessory_row(row_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM order_accessories WHERE id = ?", (row_id,))
+    conn.commit()
+    conn.close()
+
+
+# --- İrsaliyeler (gelen mal kaydı) - kaydedildiğinde ilgili "gelen" alanını otomatik günceller ---
+def add_irsaliye(order_id, item_id, kategori, irsaliye_no, tedarikci, miktar, birim, gelis_tarihi, aciklama=''):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute('''INSERT INTO irsaliyeler (order_id, item_id, kategori, irsaliye_no, tedarikci, miktar,
                 birim, gelis_tarihi, aciklama, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-             (order_id, color_id, kategori, irsaliye_no, tedarikci, miktar, birim, gelis_tarihi,
+             (order_id, item_id, kategori, irsaliye_no, tedarikci, miktar, birim, gelis_tarihi,
               aciklama, datetime.now().isoformat()))
     irs_id = c.lastrowid
+
+    # Kalan/gelen miktarları otomatik düş
+    if kategori == 'Kumaş' and item_id:
+        c.execute("UPDATE order_fabrics SET kumas_gelen_kg = COALESCE(kumas_gelen_kg,0) + ? WHERE id = ?",
+                 (miktar, item_id))
+    elif kategori == 'Lastik' and item_id:
+        if birim == 'adet':
+            c.execute("UPDATE order_elastics SET lastik_gelen_adet = COALESCE(lastik_gelen_adet,0) + ? WHERE id = ?",
+                     (miktar, item_id))
+        else:
+            c.execute("UPDATE order_elastics SET lastik_gelen_cm = COALESCE(lastik_gelen_cm,0) + ? WHERE id = ?",
+                     (miktar, item_id))
+    elif kategori == 'Aksesuar' and item_id:
+        c.execute("UPDATE order_accessories SET aksesuar_gelen_adet = COALESCE(aksesuar_gelen_adet,0) + ? WHERE id = ?",
+                 (miktar, item_id))
+    elif kategori == 'Kutu':
+        c.execute("UPDATE orders SET kutu_gelen_adet = COALESCE(kutu_gelen_adet,0) + ? WHERE id = ?",
+                 (miktar, order_id))
+
     conn.commit()
     conn.close()
     return irs_id
@@ -914,8 +1018,9 @@ def get_irsaliyeler(order_id=None):
 def export_all_data():
     conn = get_conn()
     c = conn.cursor()
-    tables = ['users', 'manufacturers', 'product_groups', 'fabrics', 'elastics', 'recipes',
-              'orders', 'order_sizes', 'order_colors', 'logs', 'app_settings', 'irsaliyeler']
+    tables = ['users', 'manufacturers', 'product_groups', 'product_names', 'fabrics', 'elastics', 'recipes',
+              'orders', 'order_sizes', 'order_fabrics', 'order_elastics', 'order_accessories',
+              'logs', 'app_settings', 'irsaliyeler']
     result = {}
     for t in tables:
         c.execute(f"SELECT * FROM {t}")
@@ -931,9 +1036,10 @@ def update_order_status(order_id, status):
     conn.close()
 
 
-def update_order_assignment(order_id, manufacturer_id, full_service, color_assignments):
+def update_order_assignment(order_id, manufacturer_id, full_service,
+                            fabric_assignments, elastic_assignments, accessory_assignments):
     """
-    color_assignments: [{'id': color_id, 'kumas_manufacturer_id':.., 'lastik_manufacturer_id':.., 'aksesuar_manufacturer_id':..}]
+    *_assignments: [{'id': row_id, 'manufacturer_id': ..}]
     """
     conn = get_conn()
     c = conn.cursor()
@@ -949,38 +1055,31 @@ def update_order_assignment(order_id, manufacturer_id, full_service, color_assig
               (manufacturer_id, assignment_type, order_id))
 
     if full_service and manufacturer_id:
-        c.execute('''UPDATE order_colors
-                     SET kumas_manufacturer_id = ?, lastik_manufacturer_id = ?,
-                         aksesuar_manufacturer_id = CASE WHEN aksesuar_adi != '' THEN ? ELSE aksesuar_manufacturer_id END
-                     WHERE order_id = ?''',
-                  (manufacturer_id, manufacturer_id, manufacturer_id, order_id))
+        c.execute("UPDATE order_fabrics SET kumas_manufacturer_id = ? WHERE order_id = ?", (manufacturer_id, order_id))
+        c.execute("UPDATE order_elastics SET lastik_manufacturer_id = ? WHERE order_id = ?", (manufacturer_id, order_id))
+        c.execute("UPDATE order_accessories SET aksesuar_manufacturer_id = ? WHERE order_id = ?", (manufacturer_id, order_id))
     else:
-        for ca in color_assignments:
-            c.execute('''UPDATE order_colors
-                         SET kumas_manufacturer_id = ?, lastik_manufacturer_id = ?, aksesuar_manufacturer_id = ?
-                         WHERE id = ? AND order_id = ?''',
-                      (ca.get('kumas_manufacturer_id'), ca.get('lastik_manufacturer_id'),
-                       ca.get('aksesuar_manufacturer_id'), ca['id'], order_id))
+        for fa in fabric_assignments:
+            c.execute("UPDATE order_fabrics SET kumas_manufacturer_id = ? WHERE id = ? AND order_id = ?",
+                     (fa.get('manufacturer_id'), fa['id'], order_id))
+        for ea in elastic_assignments:
+            c.execute("UPDATE order_elastics SET lastik_manufacturer_id = ? WHERE id = ? AND order_id = ?",
+                     (ea.get('manufacturer_id'), ea['id'], order_id))
+        for aa in accessory_assignments:
+            c.execute("UPDATE order_accessories SET aksesuar_manufacturer_id = ? WHERE id = ? AND order_id = ?",
+                     (aa.get('manufacturer_id'), aa['id'], order_id))
 
     conn.commit()
     conn.close()
 
 
-def update_order_basic(order_id, model_name, gender, urun_grubu, deadline,
+def update_order_basic(order_id, model_name, gender, urun_grubu, deadline, siparis_tarihi,
                         kumas_fire_orani, lastik_fire_orani):
     conn = get_conn()
     conn.execute('''UPDATE orders SET model_name = ?, gender = ?, urun_grubu = ?, deadline = ?,
-                    kumas_fire_orani = ?, lastik_fire_orani = ? WHERE id = ?''',
-                (model_name, gender, urun_grubu, deadline, kumas_fire_orani, lastik_fire_orani, order_id))
-    conn.commit()
-    conn.close()
-
-
-def update_fabric_tracking(color_id, siparis_kg, gelen_kg, siparis_tarihi, termin_tarihi):
-    conn = get_conn()
-    conn.execute('''UPDATE order_colors SET kumas_siparis_kg = ?, kumas_gelen_kg = ?,
-                    kumas_siparis_tarihi = ?, kumas_termin_tarihi = ? WHERE id = ?''',
-                (siparis_kg, gelen_kg, siparis_tarihi, termin_tarihi, color_id))
+                    siparis_tarihi = ?, kumas_fire_orani = ?, lastik_fire_orani = ? WHERE id = ?''',
+                (model_name, gender, urun_grubu, deadline, siparis_tarihi,
+                 kumas_fire_orani, lastik_fire_orani, order_id))
     conn.commit()
     conn.close()
 
@@ -988,7 +1087,9 @@ def update_fabric_tracking(color_id, siparis_kg, gelen_kg, siparis_tarihi, termi
 def delete_order(order_id):
     conn = get_conn()
     conn.execute("DELETE FROM order_sizes WHERE order_id = ?", (order_id,))
-    conn.execute("DELETE FROM order_colors WHERE order_id = ?", (order_id,))
+    conn.execute("DELETE FROM order_fabrics WHERE order_id = ?", (order_id,))
+    conn.execute("DELETE FROM order_elastics WHERE order_id = ?", (order_id,))
+    conn.execute("DELETE FROM order_accessories WHERE order_id = ?", (order_id,))
     conn.execute("DELETE FROM orders WHERE id = ?", (order_id,))
     conn.commit()
     conn.close()

@@ -8,7 +8,7 @@ from datetime import datetime, date, timedelta
 import database as db
 from constants import (
     SIZES, GENDERS, PACKAGE_SIZES, ORDER_STATUSES, CLOSED_STATUSES, ELASTIC_TYPES, FABRIC_TYPES,
-    DEFAULT_PRODUCT_GROUPS, CURRENCIES, IRSALIYE_KATEGORILERI,
+    DEFAULT_PRODUCT_GROUPS, IRSALIYE_KATEGORILERI, RAPORLU_LASTIK,
     MATERIAL_STATUS_DONE, MATERIAL_STATUS_PENDING, MATERIAL_STATUS_NA,
     MATERIAL_STATUS_COLORS,
 )
@@ -37,6 +37,8 @@ db.init_db()
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+TR_DATE_FMT = "DD.MM.YYYY"
+
 # ======================================================================
 # GÖRSEL TEMA / CSS
 # ======================================================================
@@ -44,10 +46,6 @@ CUSTOM_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
-/* Sadece güvenli metin elemanlarına özel font uygula - ikon fontlarını (chevron/ok simgeleri)
-   ASLA ezme! Genel span/div üzerine kural koymak Streamlit'in materyal ikon
-   font ligature'larını bozup "keyboard_arrow_right" gibi ham metin olarak
-   görünmesine (yazı çakışmasına) sebep oluyordu. */
 html, body, .stApp { font-family: 'Inter', -apple-system, sans-serif; }
 h1, h2, h3, h4, h5, h6,
 p, li, label,
@@ -59,7 +57,6 @@ p, li, label,
 div[data-testid="stMetricValue"], div[data-testid="stMetricLabel"] {
     font-family: 'Inter', -apple-system, sans-serif !important;
 }
-/* İkon fontlarını (Material Symbols) olduğu gibi bırak - kesinlikle ezme */
 [data-testid="stIconMaterial"],
 [data-testid="stExpanderToggleIcon"],
 span[class*="material-icons"],
@@ -72,6 +69,17 @@ footer {visibility: hidden;}
 header[data-testid="stHeader"] {background: transparent;}
 
 .stApp { background: #f4f6fa; }
+
+/* --- Kompakt giriş kutuları (Reçeteler hariç genel görünüm) --- */
+.stTextInput input, .stNumberInput input, .stDateInput input {
+    padding: 5px 10px !important;
+    font-size: 0.84rem !important;
+    min-height: 32px !important;
+}
+.stSelectbox div[data-baseweb="select"] > div {
+    min-height: 32px !important;
+    font-size: 0.84rem !important;
+}
 
 /* --- Sidebar --- */
 section[data-testid="stSidebar"] {
@@ -142,6 +150,20 @@ div[data-testid="stForm"] { background:#fff; border:1px solid #e2e8f0; border-ra
 .pk-track-table { width:100%; border-collapse: collapse; font-size: 0.86rem; }
 .pk-track-table th { text-align:left; padding: 8px 10px; background:#f1f5f9; color:#475569; font-weight:700; border-bottom: 2px solid #e2e8f0; }
 .pk-track-table td { padding: 8px 10px; border-bottom: 1px solid #e2e8f0; }
+
+/* --- Sipariş kartı metrik kutucukları (gölgeli, durum renkli) --- */
+.pk-chip-row { display:flex; gap:10px; margin: 6px 0 14px 0; flex-wrap: wrap; }
+.pk-chip {
+    flex: 1; min-width: 110px; border-radius: 10px; padding: 10px 14px;
+    box-shadow: 0 2px 6px rgba(15,23,42,0.08);
+    border: 1px solid rgba(0,0,0,0.04);
+}
+.pk-chip .pk-chip-label { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; opacity: 0.75; }
+.pk-chip .pk-chip-value { font-size: 1.15rem; font-weight: 800; margin-top: 2px; }
+.pk-chip.green { background: #dcfce7; color: #15803d; }
+.pk-chip.yellow { background: #fef9c3; color: #a16207; }
+.pk-chip.red { background: #fee2e2; color: #b91c1c; }
+.pk-chip.gray { background: #f1f5f9; color: #475569; }
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -158,29 +180,38 @@ if 'edit_order_id' not in st.session_state:
 # YARDIMCI FONKSİYONLAR
 # ======================================================================
 
-def get_urgency_color(deadline_str):
-    if not deadline_str:
-        return '#94a3b8'
+def tr_date(iso_str):
+    """ISO (YYYY-MM-DD) tarihi Türkçe (GG.AA.YYYY) formatına çevirir."""
+    if not iso_str:
+        return '-'
     try:
-        dl = datetime.strptime(deadline_str, '%Y-%m-%d').date()
-        diff = (dl - date.today()).days
-        if diff <= 3:
-            return '#dc2626'
-        elif diff <= 7:
-            return '#d97706'
-        elif diff <= 14:
-            return '#ca8a04'
-        else:
-            return '#16a34a'
+        return datetime.strptime(iso_str[:10], '%Y-%m-%d').strftime('%d.%m.%Y')
     except Exception:
-        return '#94a3b8'
+        return iso_str
+
+
+def urgency_bucket(deadline_str):
+    """15+ gün -> green, 1-14 gün -> yellow, <=0 gün -> red, tarih yoksa -> gray"""
+    if not deadline_str:
+        return 'gray'
+    try:
+        dl = datetime.strptime(deadline_str[:10], '%Y-%m-%d').date()
+        diff = (dl - date.today()).days
+        if diff <= 0:
+            return 'red'
+        elif diff <= 14:
+            return 'yellow'
+        else:
+            return 'green'
+    except Exception:
+        return 'gray'
 
 
 def get_urgency_label(deadline_str):
     if not deadline_str:
         return '⚪ Belirtilmedi'
     try:
-        dl = datetime.strptime(deadline_str, '%Y-%m-%d').date()
+        dl = datetime.strptime(deadline_str[:10], '%Y-%m-%d').date()
         diff = (dl - date.today()).days
         if diff < 0:
             return f'🔴 GECİKMİŞ ({abs(diff)} gün)'
@@ -199,20 +230,10 @@ def get_urgency_label(deadline_str):
 
 
 def fabric_row_color(termin_str):
-    """Kumaş takip satırı arka plan rengi: 15+ gün yeşil, 1-14 turuncu, 0/geçmiş kırmızı."""
     if not termin_str:
         return '#ffffff'
-    try:
-        dl = datetime.strptime(termin_str, '%Y-%m-%d').date()
-        diff = (dl - date.today()).days
-        if diff <= 0:
-            return '#fee2e2'
-        elif diff <= 14:
-            return '#ffedd5'
-        else:
-            return '#dcfce7'
-    except Exception:
-        return '#ffffff'
+    bucket = urgency_bucket(termin_str)
+    return {'green': '#dcfce7', 'yellow': '#ffedd5', 'red': '#fee2e2', 'gray': '#ffffff'}[bucket]
 
 
 def badge(text, color):
@@ -263,91 +284,56 @@ def show_photo(path, caption=''):
         st.caption("📷 Fotoğraf yok")
 
 
-def generate_irsaliye_pdf(irsaliye, order):
-    if not HAS_PDF:
-        return None
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(20 * mm, height - 20 * mm, "İRSALİYE - Paul Kenzie ERP")
-    c.setFont("Helvetica", 10)
-    y = height - 35 * mm
-    c.drawString(20 * mm, y, f"İrsaliye No: {irsaliye.get('irsaliye_no', '-')}")
-    y -= 7 * mm
-    c.drawString(20 * mm, y, f"Geliş Tarihi: {irsaliye.get('gelis_tarihi', '-')}")
-    y -= 7 * mm
-    c.drawString(20 * mm, y, f"Kategori: {irsaliye.get('kategori', '-')} | Model: {order.get('model_name','-')} "
-                             f"({order.get('model_kodu','-')})")
-    y -= 7 * mm
-    c.drawString(20 * mm, y, f"Tedarikçi: {irsaliye.get('tedarikci', '-')} | "
-                             f"Miktar: {irsaliye.get('miktar', 0)} {irsaliye.get('birim', '')}")
-    y -= 10 * mm
-    c.setFont("Helvetica", 9)
-    if irsaliye.get('aciklama'):
-        c.drawString(20 * mm, y, f"Açıklama: {irsaliye['aciklama']}")
-        y -= 10 * mm
-    c.setFont("Helvetica", 8)
-    c.drawString(20 * mm, y, f"Oluşturulma: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Sistem: Paul Kenzie ERP")
-    c.showPage()
-    c.save()
-    buffer.seek(0)
-    return buffer.getvalue()
+def render_chip(label, value, bucket):
+    st.markdown(f'''<div class="pk-chip {bucket}">
+        <div class="pk-chip-label">{label}</div>
+        <div class="pk-chip-value">{value}</div>
+        </div>''', unsafe_allow_html=True)
 
 
-def render_irsaliye_form(order_id, color_id, kategori, tedarikci_default, birim):
-    key_prefix = f"irs_{kategori}_{order_id}_{color_id}"
-    with st.form(f"form_{key_prefix}"):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            irsaliye_no = st.text_input("İrsaliye No", value=f"IRS-{datetime.now().strftime('%Y%m%d')}-{order_id}",
-                                        key=f"no_{key_prefix}")
-            tedarikci = st.text_input("Tedarikçi", value=tedarikci_default, key=f"ted_{key_prefix}")
-        with c2:
-            miktar = st.number_input(f"Miktar ({birim})", min_value=0.0, value=0.0, key=f"mik_{key_prefix}")
-            gelis_tarihi = st.date_input("Geliş Tarihi", value=date.today(), key=f"gt_{key_prefix}")
-        with c3:
-            aciklama = st.text_area("Açıklama", key=f"ac_{key_prefix}")
-        if st.form_submit_button("💾 İrsaliyeyi Kaydet", type="primary"):
-            irs_id = db.add_irsaliye(order_id, color_id, kategori, irsaliye_no, tedarikci, miktar, birim,
-                                     gelis_tarihi.isoformat(), aciklama)
-            db.add_log(st.session_state.user['id'], st.session_state.user['username'],
-                      'İrsaliye Oluşturuldu', f"{kategori} - {irsaliye_no}")
-            st.session_state[f'last_irs_{key_prefix}'] = irs_id
-            st.success("İrsaliye kaydedildi!")
-            st.rerun()
+def order_chip_row(o):
+    """Toplam Adet / Toplam Kutu / Kumaş / Lastik kutucukları - tamamlanma & termin durumuna göre renkli."""
+    order_bucket = urgency_bucket(o.get('deadline'))
 
-    last_irs_id = st.session_state.get(f'last_irs_{key_prefix}')
-    if last_irs_id:
-        irsaliyeler = db.get_irsaliyeler(order_id)
-        irs = next((i for i in irsaliyeler if i['id'] == last_irs_id), None)
-        if irs and HAS_PDF:
-            order = db.get_order_detail(order_id)
-            pdf_bytes = generate_irsaliye_pdf(irs, order)
-            if pdf_bytes:
-                st.download_button(f"📄 PDF İndir - {irs['irsaliye_no']}", data=pdf_bytes,
-                                  file_name=f"{irs['irsaliye_no']}.pdf", mime="application/pdf",
-                                  key=f"dl_{key_prefix}_{last_irs_id}")
-        elif irs and not HAS_PDF:
-            st.warning("PDF kütüphanesi (reportlab) kurulu değil.")
+    fab_done = all(f['kumas_status'] == MATERIAL_STATUS_DONE for f in o['fabrics']) if o['fabrics'] else False
+    fab_terms = [f.get('kumas_termin_tarihi') for f in o['fabrics'] if f.get('kumas_termin_tarihi')]
+    fab_bucket = 'green' if fab_done else (urgency_bucket(min(fab_terms)) if fab_terms else 'gray')
+
+    el_done = all(e['lastik_status'] == MATERIAL_STATUS_DONE for e in o['elastics']) if o['elastics'] else False
+    el_terms = [e.get('lastik_termin_tarihi') for e in o['elastics'] if e.get('lastik_termin_tarihi')]
+    el_bucket = 'green' if el_done else (urgency_bucket(min(el_terms)) if el_terms else 'gray')
+
+    html = '<div class="pk-chip-row">'
+    for label, value, bucket in [
+        ('Toplam Adet', f"{o['total_quantity']:,}", order_bucket),
+        ('Toplam Kutu', f"{o['total_boxes']:,}", order_bucket),
+        ('Kumaş (kg)', f"{o['kumas_kg_total']}", fab_bucket),
+        ('Lastik', f"{o['lastik_cm_total']} cm", el_bucket),
+    ]:
+        html += f'''<div class="pk-chip {bucket}">
+            <div class="pk-chip-label">{label}</div>
+            <div class="pk-chip-value">{value}</div>
+            </div>'''
+    html += '</div>'
+    st.markdown(html, unsafe_allow_html=True)
 
 
-def render_fabric_tracking_table(colors):
+def render_fabric_tracking_table(fabrics):
     rows_html = ""
-    for col in colors:
-        bg = fabric_row_color(col.get('kumas_termin_tarihi'))
+    for f in fabrics:
+        bg = fabric_row_color(f.get('kumas_termin_tarihi'))
         rows_html += f"""<tr style="background:{bg};">
-            <td>{col['color_name']}</td>
-            <td>{col.get('kumas_adi') or '-'}</td>
-            <td>{col['kumas_kg']}</td>
-            <td>{col.get('kumas_siparis_kg') or 0}</td>
-            <td>{col.get('kumas_gelen_kg') or 0}</td>
-            <td>{col['kumas_kalan_kg']}</td>
-            <td>{col.get('kumas_siparis_tarihi') or '-'}</td>
-            <td>{col.get('kumas_termin_tarihi') or '-'}</td>
+            <td>{f.get('kumas_adi') or '-'}</td>
+            <td>{f.get('kumas_renk') or '-'}</td>
+            <td>{f['kumas_kg_required']}</td>
+            <td>{f.get('kumas_siparis_kg') or 0}</td>
+            <td>{f.get('kumas_gelen_kg') or 0}</td>
+            <td>{f['kumas_kalan_kg']}</td>
+            <td>{tr_date(f.get('kumas_siparis_tarihi'))}</td>
+            <td>{tr_date(f.get('kumas_termin_tarihi'))}</td>
         </tr>"""
     html = f"""<table class="pk-track-table">
-        <tr><th>Renk</th><th>Kumaş</th><th>Gerekli (kg)</th><th>Sipariş (kg)</th>
+        <tr><th>Kumaş</th><th>Renk</th><th>Gerekli (kg)</th><th>Sipariş (kg)</th>
         <th>Gelen (kg)</th><th>Kalan (kg)</th><th>Sipariş Tarihi</th><th>Termin</th></tr>
         {rows_html}
     </table>"""
@@ -413,6 +399,7 @@ def page_dashboard():
 # YENİ SİPARİŞ SİHİRBAZI
 # ======================================================================
 STEP_LABELS = ["Temel Bilgiler", "Sipariş Adedi", "Kumaş / Lastik / Aksesuar", "Onay"]
+NEW_PN_SENTINEL = "➕ Yeni Ürün Adı..."
 
 
 def render_steps(active):
@@ -426,11 +413,38 @@ def render_steps(active):
 
 
 def reset_wizard():
+    keys_to_clear = [k for k in st.session_state.keys() if k.startswith(('size_box_', 'w_', 'fab_', 'el_', 'ak_', '_pn_applied'))]
+    for k in keys_to_clear:
+        del st.session_state[k]
     st.session_state.order_step = 1
     st.session_state.order_data = {}
-    for k in list(st.session_state.keys()):
-        if k.startswith('size_box_') or k.startswith('col_'):
-            del st.session_state[k]
+    st.session_state.wiz_fabric_count = 1
+    st.session_state.wiz_elastic_count = 1
+    st.session_state.wiz_accessory_count = 0
+
+
+def _on_pn_change():
+    sel = st.session_state.get('w_urun_adi_sel')
+    if sel and sel != NEW_PN_SENTINEL:
+        rec = db.get_product_name_by_name(sel)
+        if rec:
+            st.session_state['w_gender'] = rec['gender']
+            groups = [g['name'] for g in db.get_product_groups(rec['gender'])]
+            if rec['urun_grubu'] in groups:
+                st.session_state['w_urun_grubu'] = rec['urun_grubu']
+
+
+def compute_preview_totals(sizes, kumas_fire, lastik_fire):
+    kumas_fire_mult = 1 + (kumas_fire or 0) / 100.0
+    lastik_fire_mult = 1 + (lastik_fire or 0) / 100.0
+    kumas_gr_total = sum(s['box_qty'] * s['kumas_gr'] for s in sizes) * kumas_fire_mult
+    lastik_adet_total = sum(s['box_qty'] * s['lastik_adet'] for s in sizes) * lastik_fire_mult
+    lastik_cm_total = sum(s['box_qty'] * s['lastik_cm'] for s in sizes) * lastik_fire_mult
+    return {
+        'kumas_kg_total': round(kumas_gr_total / 1000.0, 3),
+        'lastik_adet_total': round(lastik_adet_total, 1),
+        'lastik_cm_total': round(lastik_cm_total, 1),
+    }
 
 
 def page_yeni_siparis():
@@ -440,76 +454,78 @@ def page_yeni_siparis():
         st.session_state.order_step = 1
     if 'order_data' not in st.session_state:
         st.session_state.order_data = {}
+    if 'wiz_fabric_count' not in st.session_state:
+        st.session_state.wiz_fabric_count = 1
+    if 'wiz_elastic_count' not in st.session_state:
+        st.session_state.wiz_elastic_count = 1
+    if 'wiz_accessory_count' not in st.session_state:
+        st.session_state.wiz_accessory_count = 0
 
     step = st.session_state.order_step
     render_steps(step)
 
-    fabrics = db.get_fabrics()
-    elastics = db.get_elastics()
-
     # ---------------- STEP 1: Temel Bilgiler ----------------
     if step == 1:
+        product_names_all = db.get_product_names()
+        pn_display = [NEW_PN_SENTINEL] + [p['name'] for p in product_names_all]
+
         c1, c2 = st.columns(2)
         with c1:
-            model_name = st.text_input("ÜRÜN ADI *", key="w_model_name")
+            pn_sel = st.selectbox("ÜRÜN ADI *", pn_display, key="w_urun_adi_sel", on_change=_on_pn_change)
+            if pn_sel == NEW_PN_SENTINEL:
+                new_model_name = st.text_input("Yeni Ürün Adı", key="w_new_pn_name")
+                save_new_pn = st.checkbox("Bu ürün adını kaydet (tekrar kullanmak için)", value=True, key="w_save_pn")
+                model_name = new_model_name
+            else:
+                model_name = pn_sel
+                save_new_pn = False
+
             gender = st.radio("CİNSİYET *", GENDERS, horizontal=True, key="w_gender")
             groups = db.get_product_groups(gender)
             if not groups:
                 st.warning(f"'{gender}' için Ayarlar > Ürün Grupları bölümünden ürün grubu tanımlamalısınız.")
                 urun_grubu = None
             else:
-                urun_grubu = st.selectbox("ÜRÜN GRUBU *", [g['name'] for g in groups], key="w_urun_grubu")
+                group_names = [g['name'] for g in groups]
+                if st.session_state.get('w_urun_grubu') not in group_names:
+                    st.session_state['w_urun_grubu'] = group_names[0]
+                urun_grubu = st.selectbox("ÜRÜN GRUBU *", group_names, key="w_urun_grubu")
             package_size = st.selectbox("KUTU İÇİ ADEDİ *", PACKAGE_SIZES,
                                          format_func=lambda x: f"{x}'li paket", key="w_package_size")
         with c2:
-            deadline = st.date_input("TERMİN TARİHİ *", min_value=date.today(), key="w_deadline")
+            siparis_tarihi = st.date_input("SİPARİŞ TARİHİ *", value=date.today(), format=TR_DATE_FMT, key="w_siparis_tarihi")
+            deadline = st.date_input("TERMİN TARİHİ *", min_value=date.today(), format=TR_DATE_FMT, key="w_deadline")
             kumas_fire = st.number_input("KUMAŞ FİRE ORANI (%)", min_value=0.0, max_value=50.0, value=3.0, step=0.5,
                                           key="w_kumas_fire")
             lastik_fire = st.number_input("LASTİK FİRE ORANI (%)", min_value=0.0, max_value=50.0, value=3.0, step=0.5,
                                            key="w_lastik_fire")
             urun_foto = st.file_uploader("ÜRÜN FOTOĞRAFI (opsiyonel)", type=['png', 'jpg', 'jpeg'], key="w_urun_foto")
 
-        settings = db.get_settings()
         manufacturers = db.get_manufacturers()
-        with st.expander("💰 Maliyet Parametreleri (opsiyonel)"):
-            c3, c4 = st.columns(2)
-            with c3:
-                para_birimi = st.selectbox("Para Birimi", CURRENCIES,
-                                           index=CURRENCIES.index(settings['varsayilan_para']), key="w_para")
-                iscilik_birim = st.number_input("İşçilik (birim/parça)", min_value=0.0, value=0.0, step=0.5, key="w_iscilik")
-            with c4:
-                genel_gider_yuzde = st.number_input("Genel Gider (%)", min_value=0.0, value=10.0, step=1.0, key="w_gg")
-                kar_yuzde = st.number_input("Kâr Marjı (%)", min_value=0.0, value=30.0, step=1.0, key="w_kar")
-            st.markdown("**Kutu**")
-            c5, c6 = st.columns(2)
-            with c5:
-                kutu_mf_names, kutu_mf_ids = mf_options(manufacturers, "— Belirtilmedi —")
-                kutu_mf_sel = st.selectbox("Kutu Üreticisi", kutu_mf_names, key="w_kutu_mf")
-                kutu_manufacturer_id = kutu_mf_ids[kutu_mf_names.index(kutu_mf_sel)]
-            with c6:
-                kutu_fiyat = st.number_input("Kutu Fiyatı (adet başına)", min_value=0.0, value=0.0, step=0.5, key="w_kutu_fiyat")
+        st.markdown("**📦 Kutu**")
+        names, ids = mf_options(manufacturers, "— Belirtilmedi —")
+        kutu_mf_sel = st.selectbox("Kutu Üreticisi (opsiyonel)", names, key="w_kutu_mf")
+        kutu_manufacturer_id = ids[names.index(kutu_mf_sel)]
 
         if st.button("Devam Et →", width='stretch', type="primary"):
-            if not model_name.strip():
+            if not model_name or not model_name.strip():
                 st.error("Ürün adı boş olamaz!")
             elif not urun_grubu:
                 st.error("Ürün grubu seçilmedi!")
             else:
+                if pn_sel == NEW_PN_SENTINEL and save_new_pn:
+                    db.add_product_name(model_name.strip(), gender, urun_grubu)
                 st.session_state.order_data.update({
                     'model_name': model_name.strip(),
                     'gender': gender,
                     'urun_grubu': urun_grubu,
                     'package_size': package_size,
+                    'siparis_tarihi': siparis_tarihi.isoformat(),
                     'deadline': deadline.isoformat(),
                     'kumas_fire_orani': kumas_fire,
                     'lastik_fire_orani': lastik_fire,
                     '_urun_foto_file': urun_foto,
-                    'para_birimi': para_birimi,
-                    'iscilik_birim': iscilik_birim,
-                    'genel_gider_yuzde': genel_gider_yuzde,
-                    'kar_yuzde': kar_yuzde,
                     'kutu_manufacturer_id': kutu_manufacturer_id,
-                    'kutu_fiyat': kutu_fiyat,
                 })
                 st.session_state.order_step = 2
                 st.rerun()
@@ -521,7 +537,7 @@ def page_yeni_siparis():
                     f"**Ürün Grubu:** {data['urun_grubu']}  |  **Paket:** {data['package_size']}'li")
 
         recipe = db.get_recipe(data['gender'], data['urun_grubu'])
-        has_recipe = any(recipe[s]['kumas_gr'] > 0 or recipe[s]['lastik_mt'] > 0 for s in SIZES)
+        has_recipe = any(recipe[s]['kumas_gr'] > 0 or recipe[s]['lastik_cm'] > 0 for s in SIZES)
         if not has_recipe:
             st.warning("Bu ürün grubu için Ayarlar > Reçeteler bölümünde henüz kumaş/lastik reçetesi tanımlanmamış. "
                        "Kutu adetlerini girebilirsiniz ama kumaş/lastik ihtiyacı 0 hesaplanacaktır.")
@@ -532,7 +548,7 @@ def page_yeni_siparis():
             with cols[i]:
                 st.number_input(size, min_value=0, value=0, step=1, key=f"size_box_{size}", label_visibility="visible")
                 r = recipe[size]
-                st.caption(f"K:{r['kumas_gr']}gr L:{r['lastik_mt']}mt")
+                st.caption(f"K:{r['kumas_gr']}gr L:{r['lastik_cm']}cm")
 
         active_sizes = [s for s in SIZES if st.session_state.get(f"size_box_{s}", 0) > 0]
 
@@ -555,92 +571,130 @@ def page_yeni_siparis():
                             'box_qty': int(st.session_state.get(f"size_box_{size}", 0)),
                             'kumas_gr': r['kumas_gr'],
                             'lastik_adet': r['lastik_adet'],
-                            'lastik_mt': r['lastik_mt'],
+                            'lastik_cm': r['lastik_cm'],
                         })
                     st.session_state.order_data['sizes'] = sizes_payload
                     st.session_state.order_data['total_boxes'] = sum(s['box_qty'] for s in sizes_payload)
                     st.session_state.order_step = 3
                     st.rerun()
 
-    # ---------------- STEP 3: Kumaş / Lastik / Aksesuar ----------------
+    # ---------------- STEP 3: Kumaş / Lastik / Aksesuar (bağımsız, dinamik satırlar) ----------------
     elif step == 3:
         data = st.session_state.order_data
-        package_size = data['package_size']
+        fabrics_master = db.get_fabrics()
+        elastics_master = db.get_elastics()
+        preview = compute_preview_totals(data['sizes'], data['kumas_fire_orani'], data['lastik_fire_orani'])
 
-        if package_size == 1:
-            st.caption("Tekli ürün — tek renk/varyant bilgisi girin.")
-        else:
-            st.caption(f"Paket içinde {package_size} renk var — her renk için ayrı satır girin.")
+        fabric_names = ["— Tanımlı değil —"] + [f"{f['name']} ({f['kumas_turu']})" for f in fabrics_master]
+        fabric_ids = [None] + [f['id'] for f in fabrics_master]
+        elastic_labels = ["— Tanımlı değil —"] + [f"{e['tur']} ({e['boyut']})" for e in elastics_master]
+        elastic_ids = [None] + [e['id'] for e in elastics_master]
 
-        with st.form("order_step3"):
-            colors_input = []
+        st.markdown("### 🧵 Kumaş")
+        n_fab = st.session_state.wiz_fabric_count
+        for i in range(1, n_fab + 1):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.selectbox("Kumaş", fabric_names, key=f"fab_sel_{i}")
+            with c2:
+                st.text_input("Renk", key=f"fab_renk_{i}")
+            with c3:
+                st.file_uploader("Fotoğraf", type=['png', 'jpg', 'jpeg'], key=f"fab_foto_{i}")
+        st.caption(f"Bu {n_fab} satıra toplam kumaş ihtiyacı ({preview['kumas_kg_total']} kg) eşit bölünecektir.")
+        if st.button("➕ Kumaş Satırı Ekle", key="add_fab_row"):
+            st.session_state.wiz_fabric_count += 1
+            st.rerun()
+        if n_fab > 1 and st.button("➖ Son Kumaş Satırını Kaldır", key="rm_fab_row"):
+            for k in [f"fab_sel_{n_fab}", f"fab_renk_{n_fab}", f"fab_foto_{n_fab}"]:
+                st.session_state.pop(k, None)
+            st.session_state.wiz_fabric_count -= 1
+            st.rerun()
 
-            st.markdown("### 🧵 Kumaş")
-            fabric_names = ["— Tanımlı değil —"] + [f"{f['name']} ({f['kumas_turu']})" for f in fabrics]
-            fabric_ids = [None] + [f['id'] for f in fabrics]
-            fabric_info = {}
-            for i in range(1, package_size + 1):
-                st.markdown(f"**Renk {i}**" if package_size > 1 else "**Ürün**")
-                r1, r2, r3 = st.columns(3)
-                with r1:
-                    color_name = st.text_input("Renk / Varyant Adı", key=f"col_name_{i}",
-                                                value="Tek Renk" if package_size == 1 else "")
-                with r2:
-                    fsel = st.selectbox("Kumaş", fabric_names, key=f"col_fabric_{i}")
-                    fabric_id = fabric_ids[fabric_names.index(fsel)]
-                with r3:
-                    kumas_renk = st.text_input("Kumaş Rengi", key=f"col_krenk_{i}")
-                kumas_foto = st.file_uploader("Kumaş Fotoğrafı", type=['png', 'jpg', 'jpeg'], key=f"col_kfoto_{i}")
-                fabric_info[i] = {'color_name': color_name, 'kumas_fabric_id': fabric_id, 'kumas_renk': kumas_renk,
-                                   '_kumas_foto_file': kumas_foto}
-                if i < package_size:
-                    st.markdown("")
+        st.markdown("---")
+        st.markdown("### ➰ Lastik")
+        n_el = st.session_state.wiz_elastic_count
+        for i in range(1, n_el + 1):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                esel = st.selectbox("Lastik", elastic_labels, key=f"el_sel_{i}")
+            with c2:
+                st.text_input("Renk", key=f"el_renk_{i}")
+            with c3:
+                st.file_uploader("Fotoğraf", type=['png', 'jpg', 'jpeg'], key=f"el_foto_{i}")
+            sel_idx = elastic_labels.index(esel) if esel in elastic_labels else 0
+            sel_elastic_id = elastic_ids[sel_idx]
+            sel_elastic = next((e for e in elastics_master if e['id'] == sel_elastic_id), None)
+            if sel_elastic and sel_elastic['tur'] == RAPORLU_LASTIK:
+                per_row_adet = round(preview['lastik_adet_total'] / n_el, 1)
+                st.caption(f"📏 Raporlu lastik seçildi — bu satır ADET bazlı takip edilecek (≈{per_row_adet} adet).")
+            else:
+                per_row_cm = round(preview['lastik_cm_total'] / n_el, 1)
+                st.caption(f"📏 Bu satır CM bazlı takip edilecek (≈{per_row_cm} cm).")
+        if st.button("➕ Lastik Satırı Ekle", key="add_el_row"):
+            st.session_state.wiz_elastic_count += 1
+            st.rerun()
+        if n_el > 1 and st.button("➖ Son Lastik Satırını Kaldır", key="rm_el_row"):
+            for k in [f"el_sel_{n_el}", f"el_renk_{n_el}", f"el_foto_{n_el}"]:
+                st.session_state.pop(k, None)
+            st.session_state.wiz_elastic_count -= 1
+            st.rerun()
 
-            st.markdown("---")
-            st.markdown("### ➰ Lastik")
-            elastic_labels = ["— Tanımlı değil —"] + [f"{e['tur']} - {e['ad']} ({e['boyut']})" for e in elastics]
-            elastic_ids = [None] + [e['id'] for e in elastics]
-            elastic_info = {}
-            for i in range(1, package_size + 1):
-                st.markdown(f"**Renk {i}**" if package_size > 1 else "**Ürün**")
-                r1, r2 = st.columns(2)
-                with r1:
-                    esel = st.selectbox("Lastik", elastic_labels, key=f"col_elastic_{i}")
-                    elastic_id = elastic_ids[elastic_labels.index(esel)]
-                with r2:
-                    lastik_renk = st.text_input("Lastik Rengi", key=f"col_lrenk_{i}")
-                lastik_foto = st.file_uploader("Lastik Fotoğrafı", type=['png', 'jpg', 'jpeg'], key=f"col_lfoto_{i}")
-                elastic_info[i] = {'lastik_elastic_id': elastic_id, 'lastik_renk': lastik_renk,
-                                    '_lastik_foto_file': lastik_foto}
+        st.markdown("---")
+        st.markdown("### 🔘 Aksesuar (opsiyonel)")
+        n_ak = st.session_state.wiz_accessory_count
+        for i in range(1, n_ak + 1):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.text_input("Aksesuar Adı", key=f"ak_adi_{i}")
+            with c2:
+                st.text_input("Renk", key=f"ak_renk_{i}")
+            with c3:
+                st.file_uploader("Fotoğraf", type=['png', 'jpg', 'jpeg'], key=f"ak_foto_{i}")
+        if st.button("➕ Aksesuar Satırı Ekle", key="add_ak_row"):
+            st.session_state.wiz_accessory_count += 1
+            st.rerun()
+        if n_ak > 0 and st.button("➖ Son Aksesuar Satırını Kaldır", key="rm_ak_row"):
+            for k in [f"ak_adi_{n_ak}", f"ak_renk_{n_ak}", f"ak_foto_{n_ak}"]:
+                st.session_state.pop(k, None)
+            st.session_state.wiz_accessory_count -= 1
+            st.rerun()
 
-            st.markdown("---")
-            st.markdown("### 🔘 Aksesuar (opsiyonel)")
-            aksesuar_info = {}
-            for i in range(1, package_size + 1):
-                st.markdown(f"**Renk {i}**" if package_size > 1 else "**Ürün**")
-                r1, r2 = st.columns(2)
-                with r1:
-                    aksesuar_adi = st.text_input("Aksesuar Adı", key=f"col_aadi_{i}")
-                with r2:
-                    aksesuar_renk = st.text_input("Aksesuar Rengi", key=f"col_arenk_{i}")
-                aksesuar_foto = st.file_uploader("Aksesuar Fotoğrafı", type=['png', 'jpg', 'jpeg'], key=f"col_afoto_{i}")
-                aksesuar_info[i] = {'aksesuar_adi': aksesuar_adi, 'aksesuar_renk': aksesuar_renk,
-                                     '_aksesuar_foto_file': aksesuar_foto}
-
-            for i in range(1, package_size + 1):
-                colors_input.append({**fabric_info[i], **elastic_info[i], **aksesuar_info[i]})
-
-            cb1, cb2 = st.columns(2)
-            with cb1:
-                back = st.form_submit_button("← Geri", width='stretch')
-            with cb2:
-                next_btn = st.form_submit_button("Devam Et →", width='stretch', type="primary")
-
-            if back:
+        st.markdown("---")
+        cb1, cb2 = st.columns(2)
+        with cb1:
+            if st.button("← Geri", width='stretch', key="step3_back"):
                 st.session_state.order_step = 2
                 st.rerun()
-            if next_btn:
-                st.session_state.order_data['colors'] = colors_input
+        with cb2:
+            if st.button("Devam Et →", width='stretch', type="primary", key="step3_next"):
+                fabrics_in = []
+                for i in range(1, n_fab + 1):
+                    sel = st.session_state.get(f"fab_sel_{i}")
+                    idx = fabric_names.index(sel) if sel in fabric_names else 0
+                    fabrics_in.append({
+                        'kumas_fabric_id': fabric_ids[idx],
+                        'kumas_renk': st.session_state.get(f"fab_renk_{i}", ''),
+                        '_foto_file': st.session_state.get(f"fab_foto_{i}"),
+                    })
+                elastics_in = []
+                for i in range(1, n_el + 1):
+                    sel = st.session_state.get(f"el_sel_{i}")
+                    idx = elastic_labels.index(sel) if sel in elastic_labels else 0
+                    elastics_in.append({
+                        'lastik_elastic_id': elastic_ids[idx],
+                        'lastik_renk': st.session_state.get(f"el_renk_{i}", ''),
+                        '_foto_file': st.session_state.get(f"el_foto_{i}"),
+                    })
+                accessories_in = []
+                for i in range(1, n_ak + 1):
+                    accessories_in.append({
+                        'aksesuar_adi': st.session_state.get(f"ak_adi_{i}", ''),
+                        'aksesuar_renk': st.session_state.get(f"ak_renk_{i}", ''),
+                        '_foto_file': st.session_state.get(f"ak_foto_{i}"),
+                    })
+                st.session_state.order_data['fabrics'] = fabrics_in
+                st.session_state.order_data['elastics'] = elastics_in
+                st.session_state.order_data['accessories'] = accessories_in
                 st.session_state.order_step = 4
                 st.rerun()
 
@@ -656,40 +710,48 @@ def page_yeni_siparis():
         c4.metric("Toplam Kutu", data.get('total_boxes', 0))
 
         total_qty = data.get('total_boxes', 0) * data['package_size']
-        st.markdown(f"**Cinsiyet:** {data['gender']}  |  **Termin:** {data['deadline']}  |  "
-                    f"**Toplam Adet (parça):** {total_qty}  |  "
+        st.markdown(f"**Cinsiyet:** {data['gender']}  |  **Sipariş Tarihi:** {tr_date(data['siparis_tarihi'])}  |  "
+                    f"**Termin:** {tr_date(data['deadline'])}  |  **Toplam Adet:** {total_qty}  |  "
                     f"**Kumaş Fire:** %{data['kumas_fire_orani']}  |  **Lastik Fire:** %{data['lastik_fire_orani']}")
 
         st.markdown("---")
         st.markdown("**Beden Dağılımı**")
         st.dataframe(pd.DataFrame([
             {'Beden': s['size'], 'Kutu Adedi': s['box_qty'], 'Kumaş (gr/parça)': s['kumas_gr'],
-             'Lastik (adet/parça)': s['lastik_adet'], 'Lastik (mt/parça)': s['lastik_mt']}
+             'Lastik (adet/parça)': s['lastik_adet'], 'Lastik (cm/parça)': s['lastik_cm']}
             for s in data['sizes']
         ]), width='stretch', hide_index=True)
 
-        kumas_fire_mult = 1 + data['kumas_fire_orani'] / 100.0
-        lastik_fire_mult = 1 + data['lastik_fire_orani'] / 100.0
-        kumas_gr_total = sum(s['box_qty'] * s['kumas_gr'] for s in data['sizes']) * kumas_fire_mult
-        lastik_mt_total = sum(s['box_qty'] * s['lastik_mt'] for s in data['sizes']) * lastik_fire_mult
+        preview = compute_preview_totals(data['sizes'], data['kumas_fire_orani'], data['lastik_fire_orani'])
+        fabrics_master = {f['id']: f for f in db.get_fabrics()}
+        elastics_master = {e['id']: e for e in db.get_elastics()}
 
         st.markdown("---")
-        st.markdown("**Renk Bazlı Malzeme İhtiyacı**")
-        fabrics_by_id = {f['id']: f for f in fabrics}
-        elastics_by_id = {e['id']: e for e in elastics}
-        color_rows = []
-        for col in data['colors']:
-            fab = fabrics_by_id.get(col.get('kumas_fabric_id'))
-            ela = elastics_by_id.get(col.get('lastik_elastic_id'))
-            color_rows.append({
-                'Renk': col['color_name'],
-                'Kumaş': f"{fab['name']} / {fab['icerik']} / {col['kumas_renk']}" if fab else (col['kumas_renk'] or '—'),
-                'Kumaş (kg)': round(kumas_gr_total / 1000.0, 3),
-                'Lastik': f"{ela['tur']} {ela['ad']} ({ela['boyut']}) / {col['lastik_renk']}" if ela else (col['lastik_renk'] or '—'),
-                'Lastik (mt)': round(lastik_mt_total, 1),
-                'Aksesuar': col['aksesuar_adi'] or '—',
-            })
-        st.dataframe(pd.DataFrame(color_rows), width='stretch', hide_index=True)
+        st.markdown(f"**🧵 Kumaş** — Toplam ihtiyaç: {preview['kumas_kg_total']} kg")
+        fab_rows = []
+        n_fab = len(data['fabrics'])
+        for f in data['fabrics']:
+            fab = fabrics_master.get(f['kumas_fabric_id'])
+            fab_rows.append({'Kumaş': fab['name'] if fab else '—', 'Renk': f['kumas_renk'] or '—',
+                             'Gerekli (kg)': round(preview['kumas_kg_total'] / n_fab, 3)})
+        st.dataframe(pd.DataFrame(fab_rows), width='stretch', hide_index=True)
+
+        st.markdown(f"**➰ Lastik** — Toplam ihtiyaç: {preview['lastik_cm_total']} cm / {preview['lastik_adet_total']} adet (Raporlu)")
+        el_rows = []
+        n_el = len(data['elastics'])
+        for el in data['elastics']:
+            ela = elastics_master.get(el['lastik_elastic_id'])
+            is_raporlu = ela and ela['tur'] == RAPORLU_LASTIK
+            gerekli = round(preview['lastik_adet_total'] / n_el, 1) if is_raporlu else round(preview['lastik_cm_total'] / n_el, 1)
+            birim = 'adet' if is_raporlu else 'cm'
+            el_rows.append({'Lastik': ela['tur'] if ela else '—', 'Renk': el['lastik_renk'] or '—',
+                            'Gerekli': f"{gerekli} {birim}"})
+        st.dataframe(pd.DataFrame(el_rows), width='stretch', hide_index=True)
+
+        if data['accessories']:
+            st.markdown(f"**🔘 Aksesuar**")
+            ak_rows = [{'Aksesuar': a['aksesuar_adi'] or '—', 'Renk': a['aksesuar_renk'] or '—'} for a in data['accessories']]
+            st.dataframe(pd.DataFrame(ak_rows), width='stretch', hide_index=True)
 
         st.markdown("---")
         cb1, cb2 = st.columns(2)
@@ -699,36 +761,32 @@ def page_yeni_siparis():
                 st.rerun()
         with cb2:
             if st.button("✅ Siparişi Oluştur", width='stretch', type="primary"):
-                urun_foto_path = None
-                if data.get('_urun_foto_file') is not None:
-                    urun_foto_path = None  # set after we know order_id
-
-                order_id, color_ids = db.add_order(
+                order_id, fab_ids, el_ids, ak_ids = db.add_order(
                     data['model_name'], data['gender'], data['urun_grubu'], data['package_size'],
                     data['kumas_fire_orani'], data['lastik_fire_orani'],
-                    data['deadline'], data['sizes'], data['colors'], st.session_state.user['id'],
-                    para_birimi=data.get('para_birimi', 'TL'),
-                    iscilik_birim=data.get('iscilik_birim', 0),
-                    genel_gider_yuzde=data.get('genel_gider_yuzde', 10),
-                    kar_yuzde=data.get('kar_yuzde', 30),
-                    kutu_manufacturer_id=data.get('kutu_manufacturer_id'),
-                    kutu_fiyat=data.get('kutu_fiyat', 0),
+                    data['deadline'], data['siparis_tarihi'], data['sizes'],
+                    data['fabrics'], data['elastics'], data['accessories'], st.session_state.user['id']
                 )
 
                 if data.get('_urun_foto_file') is not None:
                     path = save_uploaded_file(data['_urun_foto_file'], f"order_{order_id}_urun")
                     db.set_order_photo(order_id, path)
 
-                for i, col in enumerate(data['colors']):
-                    color_id = color_ids[i]
-                    kf = col.get('_kumas_foto_file')
-                    lf = col.get('_lastik_foto_file')
-                    af = col.get('_aksesuar_foto_file')
-                    kpath = save_uploaded_file(kf, f"order_{order_id}_color_{color_id}_kumas") if kf else None
-                    lpath = save_uploaded_file(lf, f"order_{order_id}_color_{color_id}_lastik") if lf else None
-                    apath = save_uploaded_file(af, f"order_{order_id}_color_{color_id}_aksesuar") if af else None
-                    if kpath or lpath or apath:
-                        db.set_color_photos(color_id, kumas_foto=kpath, lastik_foto=lpath, aksesuar_foto=apath)
+                for i, f in enumerate(data['fabrics']):
+                    if f.get('_foto_file'):
+                        path = save_uploaded_file(f['_foto_file'], f"order_{order_id}_fabric_{fab_ids[i]}")
+                        db.set_fabric_photo(fab_ids[i], path)
+                for i, el in enumerate(data['elastics']):
+                    if el.get('_foto_file'):
+                        path = save_uploaded_file(el['_foto_file'], f"order_{order_id}_elastic_{el_ids[i]}")
+                        db.set_elastic_photo(el_ids[i], path)
+                for i, a in enumerate(data['accessories']):
+                    if a.get('_foto_file'):
+                        path = save_uploaded_file(a['_foto_file'], f"order_{order_id}_accessory_{ak_ids[i]}")
+                        db.set_accessory_photo(ak_ids[i], path)
+
+                if data.get('kutu_manufacturer_id'):
+                    db.update_order_kutu(order_id, data['kutu_manufacturer_id'], 0, 0, '', '')
 
                 db.add_log(st.session_state.user['id'], st.session_state.user['username'],
                           'Yeni Sipariş', f'{data["model_name"]} siparişi oluşturuldu (ID: {order_id})')
@@ -741,32 +799,62 @@ def page_yeni_siparis():
 # SİPARİŞ DETAY GÖRÜNÜMÜ (salt okunur)
 # ======================================================================
 def render_order_detail_readonly(o):
-    st.caption(f"🏷️ Model Kodu: **{o.get('model_kodu') or '—'}**")
-    d1, d2, d3, d4 = st.columns(4)
-    d1.metric("Toplam Kutu", o['total_boxes'])
-    d2.metric("Toplam Adet", o['total_quantity'])
-    d3.metric("Kumaş (kg)", o['kumas_kg_total'])
-    d4.metric("Lastik (mt)", o['lastik_mt_total'])
+    order_chip_row(o)
 
     if o.get('urun_foto'):
         show_photo(o['urun_foto'], "Ürün Fotoğrafı")
 
-    costs = db.compute_order_costs(o)
-    st.markdown("**💰 Maliyet & Kârlılık**")
-    e1, e2, e3, e4 = st.columns(4)
-    e1.metric("Birim Maliyet", f"{costs['birim_maliyet_pb']:.2f} {costs['para_birimi']}")
-    e2.metric("Satış Fiyatı (birim)", f"{costs['satis_birim_pb']:.2f} {costs['para_birimi']}")
-    e3.metric("Toplam Maliyet", f"{costs['toplam_maliyet_pb']:,.0f} {costs['para_birimi']}")
-    e4.metric("Toplam Kâr", f"{costs['kar_toplam_pb']:,.0f} {costs['para_birimi']}")
-    with st.expander("Maliyet Detayı"):
-        st.write(f"Kumaş: {costs['kumas_maliyet']:.2f} · Lastik: {costs['lastik_maliyet']:.2f} · "
-                f"Kutu: {costs['kutu_maliyet']:.2f} · Aksesuar: {costs['aksesuar_maliyet']:.2f} · "
-                f"İşçilik: {costs['iscilik_maliyet']:.2f} ({costs['para_birimi']})")
-        if costs['para_birimi'] != 'TL':
-            st.caption(f"TL karşılığı — Maliyet: {costs['toplam_maliyet_tl']:,.0f} ₺ · "
-                      f"Satış: {costs['satis_toplam_tl']:,.0f} ₺ · Kâr: {costs['kar_toplam_tl']:,.0f} ₺")
+    st.caption(f"Sipariş Tarihi: {tr_date(o.get('siparis_tarihi'))}  |  Termin: {tr_date(o.get('deadline'))}")
 
-    st.markdown("**📦 Kutu Takibi**")
+    st.markdown("**Beden Dağılımı**")
+    st.dataframe(pd.DataFrame([
+        {'Beden': s['size'], 'Kutu': s['box_qty'], 'Kumaş (gr/parça)': s['kumas_gr'],
+         'Lastik (adet/parça)': s['lastik_adet'], 'Lastik (cm/parça)': s['lastik_cm']}
+        for s in o['sizes']
+    ]), width='stretch', hide_index=True)
+
+    st.markdown("**🧵 Kumaş**")
+    for f in o['fabrics']:
+        cc1, cc2 = st.columns([3, 1])
+        with cc1:
+            st.markdown(
+                f"{material_badge(f['kumas_status'])} **{f.get('kumas_adi') or '-'}** ({f.get('kumas_turu') or '-'}) · "
+                f"{f.get('kumas_icerik') or '-'} · Renk: {f.get('kumas_renk') or '-'} · "
+                f"Üretici: {f.get('kumas_manufacturer_name') or '—'} · Gerekli: {f['kumas_kg_required']} kg",
+                unsafe_allow_html=True)
+        with cc2:
+            show_photo(f.get('kumas_foto'))
+    render_fabric_tracking_table(o['fabrics'])
+
+    st.markdown("**➰ Lastik**")
+    for e in o['elastics']:
+        birim = 'adet' if e['is_raporlu'] else 'cm'
+        gerekli = e['lastik_adet_required'] if e['is_raporlu'] else e['lastik_cm_required']
+        gelen = e.get('lastik_gelen_adet') if e['is_raporlu'] else e.get('lastik_gelen_cm')
+        cc1, cc2 = st.columns([3, 1])
+        with cc1:
+            st.markdown(
+                f"{material_badge(e['lastik_status'])} **{e.get('lastik_tur') or '-'}** ({e.get('lastik_boyut') or '-'}) · "
+                f"Renk: {e.get('lastik_renk') or '-'} · Üretici: {e.get('lastik_manufacturer_name') or '—'} · "
+                f"Gerekli: {gerekli} {birim} · Gelen: {gelen or 0} {birim}",
+                unsafe_allow_html=True)
+        with cc2:
+            show_photo(e.get('lastik_foto'))
+
+    if o['accessories']:
+        st.markdown("**🔘 Aksesuar**")
+        for a in o['accessories']:
+            cc1, cc2 = st.columns([3, 1])
+            with cc1:
+                st.markdown(
+                    f"{material_badge(a['aksesuar_status'])} **{a['aksesuar_adi']}** · Renk: {a.get('aksesuar_renk') or '-'} · "
+                    f"Üretici: {a.get('aksesuar_manufacturer_name') or '—'} · "
+                    f"Gerekli: {a['aksesuar_adet_required']} adet · Gelen: {a.get('aksesuar_gelen_adet') or 0} adet",
+                    unsafe_allow_html=True)
+            with cc2:
+                show_photo(a.get('aksesuar_foto'))
+
+    st.markdown("**📦 Kutu**")
     kutu_bg = fabric_row_color(o.get('kutu_termin_tarihi'))
     kutu_kalan = (o.get('kutu_siparis_adet') or 0) - (o.get('kutu_gelen_adet') or 0)
     st.markdown(f"""<div style="background:{kutu_bg}; padding:10px 14px; border-radius:8px; font-size:0.86rem;">
@@ -775,51 +863,13 @@ def render_order_detail_readonly(o):
         Sipariş: {o.get('kutu_siparis_adet') or 0} &nbsp;|&nbsp;
         Gelen: {o.get('kutu_gelen_adet') or 0} &nbsp;|&nbsp;
         Kalan: {kutu_kalan} &nbsp;|&nbsp;
-        Termin: {o.get('kutu_termin_tarihi') or '-'}
+        Termin: {tr_date(o.get('kutu_termin_tarihi'))}
         </div>""", unsafe_allow_html=True)
-
-    st.markdown("**Beden Dağılımı**")
-    st.dataframe(pd.DataFrame([
-        {'Beden': s['size'], 'Kutu': s['box_qty'], 'Kumaş (gr/parça)': s['kumas_gr'],
-         'Lastik (adet/parça)': s['lastik_adet'], 'Lastik (mt/parça)': s['lastik_mt']}
-        for s in o['sizes']
-    ]), width='stretch', hide_index=True)
-
-    st.markdown("**Renk / Malzeme Detayı**")
-    for col in o['colors']:
-        st.markdown(
-            f"🎨 **{col['color_name']}** &nbsp; "
-            f"Kumaş: {material_badge(col['kumas_status'])} &nbsp; "
-            f"Lastik: {material_badge(col['lastik_status'])} &nbsp; "
-            f"Aksesuar: {material_badge(col['aksesuar_status'])}",
-            unsafe_allow_html=True)
-        cc1, cc2, cc3 = st.columns(3)
-        with cc1:
-            st.caption(f"**Kumaş:** {col.get('kumas_adi') or '-'} ({col.get('kumas_turu') or '-'}) · "
-                       f"{col.get('kumas_icerik') or '-'} · {col.get('kumas_renk') or '-'}\n\n"
-                       f"Üretici: {col.get('kumas_manufacturer_name') or '—'} · {col['kumas_kg']} kg gerekli")
-            show_photo(col.get('kumas_foto'))
-        with cc2:
-            st.caption(f"**Lastik:** {col.get('lastik_tur') or '-'} {col.get('lastik_adi') or ''} · "
-                       f"{col.get('lastik_genislik') or '-'} · {col.get('lastik_renk') or '-'}\n\n"
-                       f"Üretici: {col.get('lastik_manufacturer_name') or '—'} · {col['lastik_mt_toplam']} mt")
-            show_photo(col.get('lastik_foto'))
-        with cc3:
-            if col.get('aksesuar_adi'):
-                st.caption(f"**Aksesuar:** {col['aksesuar_adi']} · {col.get('aksesuar_renk') or '-'}\n\n"
-                           f"Üretici: {col.get('aksesuar_manufacturer_name') or '—'}")
-                show_photo(col.get('aksesuar_foto'))
-            else:
-                st.caption("Aksesuar yok")
-
-    st.markdown("**Kumaş Tedarik Takibi**")
-    render_fabric_tracking_table(o['colors'])
 
 
 def order_list_page(title, subtitle, assigned_filter, is_admin, include_completed=False, year_filter=False):
     page_header(title, subtitle)
 
-    orders = None
     if year_filter:
         this_year = date.today().year
         last_year = this_year - 1
@@ -867,6 +917,77 @@ def page_tamamlanmis_siparisler():
 
 
 # ======================================================================
+# İRSALİYE / PDF
+# ======================================================================
+def generate_irsaliye_pdf(irsaliye, order):
+    if not HAS_PDF:
+        return None
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(20 * mm, height - 20 * mm, "İRSALİYE - Paul Kenzie ERP")
+    c.setFont("Helvetica", 10)
+    y = height - 35 * mm
+    c.drawString(20 * mm, y, f"İrsaliye No: {irsaliye.get('irsaliye_no', '-')}")
+    y -= 7 * mm
+    c.drawString(20 * mm, y, f"Geliş Tarihi: {tr_date(irsaliye.get('gelis_tarihi'))}")
+    y -= 7 * mm
+    c.drawString(20 * mm, y, f"Kategori: {irsaliye.get('kategori', '-')} | Ürün: {order.get('model_name','-')}")
+    y -= 7 * mm
+    c.drawString(20 * mm, y, f"Tedarikçi: {irsaliye.get('tedarikci', '-')} | "
+                             f"Miktar: {irsaliye.get('miktar', 0)} {irsaliye.get('birim', '')}")
+    y -= 10 * mm
+    c.setFont("Helvetica", 9)
+    if irsaliye.get('aciklama'):
+        c.drawString(20 * mm, y, f"Açıklama: {irsaliye['aciklama']}")
+        y -= 10 * mm
+    c.setFont("Helvetica", 8)
+    c.drawString(20 * mm, y, f"Oluşturulma: {datetime.now().strftime('%d.%m.%Y %H:%M')} | Sistem: Paul Kenzie ERP")
+    c.showPage()
+    c.save()
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def render_irsaliye_form(order_id, item_id, kategori, tedarikci_default, birim):
+    key_prefix = f"irs_{kategori}_{order_id}_{item_id}"
+    with st.form(f"form_{key_prefix}"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            irsaliye_no = st.text_input("İrsaliye No", value=f"IRS-{datetime.now().strftime('%Y%m%d')}-{order_id}",
+                                        key=f"no_{key_prefix}")
+            tedarikci = st.text_input("Tedarikçi", value=tedarikci_default, key=f"ted_{key_prefix}")
+        with c2:
+            miktar = st.number_input(f"Miktar ({birim})", min_value=0.0, value=0.0, key=f"mik_{key_prefix}")
+            gelis_tarihi = st.date_input("Geliş Tarihi", value=date.today(), format=TR_DATE_FMT, key=f"gt_{key_prefix}")
+        with c3:
+            aciklama = st.text_area("Açıklama", key=f"ac_{key_prefix}")
+        if st.form_submit_button("💾 İrsaliyeyi Kaydet (kalan miktar otomatik düşer)", type="primary"):
+            irs_id = db.add_irsaliye(order_id, item_id, kategori, irsaliye_no, tedarikci, miktar, birim,
+                                     gelis_tarihi.isoformat(), aciklama)
+            db.add_log(st.session_state.user['id'], st.session_state.user['username'],
+                      'İrsaliye Oluşturuldu', f"{kategori} - {irsaliye_no}")
+            st.session_state[f'last_irs_{key_prefix}'] = irs_id
+            st.success("İrsaliye kaydedildi, gelen/kalan miktar güncellendi!")
+            st.rerun()
+
+    last_irs_id = st.session_state.get(f'last_irs_{key_prefix}')
+    if last_irs_id:
+        irsaliyeler = db.get_irsaliyeler(order_id)
+        irs = next((i for i in irsaliyeler if i['id'] == last_irs_id), None)
+        if irs and HAS_PDF:
+            order = db.get_order_detail(order_id)
+            pdf_bytes = generate_irsaliye_pdf(irs, order)
+            if pdf_bytes:
+                st.download_button(f"📄 PDF İndir - {irs['irsaliye_no']}", data=pdf_bytes,
+                                  file_name=f"{irs['irsaliye_no']}.pdf", mime="application/pdf",
+                                  key=f"dl_{key_prefix}_{last_irs_id}")
+        elif irs and not HAS_PDF:
+            st.warning("PDF kütüphanesi (reportlab) kurulu değil.")
+
+
+# ======================================================================
 # SİPARİŞ DÜZENLE (ayrı sayfa, sadece admin)
 # ======================================================================
 def page_order_edit(order_id):
@@ -885,6 +1006,12 @@ def page_order_edit(order_id):
     page_header(f"✏️ Sipariş Düzenle — {o['model_name']}", f"ID: {o['id']}")
 
     manufacturers = db.get_manufacturers()
+    fabrics_master = db.get_fabrics()
+    elastics_master = db.get_elastics()
+    fabric_labels = ["— Tanımlı değil —"] + [f"{f['name']} ({f['kumas_turu']})" for f in fabrics_master]
+    fabric_ids_m = [None] + [f['id'] for f in fabrics_master]
+    elastic_labels = ["— Tanımlı değil —"] + [f"{e['tur']} ({e['boyut']})" for e in elastics_master]
+    elastic_ids_m = [None] + [e['id'] for e in elastics_master]
 
     # --- Temel bilgiler ---
     st.markdown('<div class="pk-section-title">Temel Bilgiler</div>', unsafe_allow_html=True)
@@ -900,17 +1027,22 @@ def page_order_edit(order_id):
             urun_grubu = st.selectbox("Ürün Grubu", group_names, index=ug_index)
         with c2:
             try:
+                st_val = datetime.strptime(o['siparis_tarihi'], '%Y-%m-%d').date() if o.get('siparis_tarihi') else date.today()
+            except Exception:
+                st_val = date.today()
+            siparis_tarihi = st.date_input("Sipariş Tarihi", value=st_val, format=TR_DATE_FMT)
+            try:
                 dl_value = datetime.strptime(o['deadline'], '%Y-%m-%d').date() if o.get('deadline') else date.today()
             except Exception:
                 dl_value = date.today()
-            deadline = st.date_input("Termin Tarihi", value=dl_value)
+            deadline = st.date_input("Termin Tarihi", value=dl_value, format=TR_DATE_FMT)
             kumas_fire = st.number_input("Kumaş Fire Oranı (%)", min_value=0.0, max_value=50.0,
                                           value=float(o['kumas_fire_orani']), step=0.5)
             lastik_fire = st.number_input("Lastik Fire Oranı (%)", min_value=0.0, max_value=50.0,
                                            value=float(o['lastik_fire_orani']), step=0.5)
         if st.form_submit_button("💾 Temel Bilgileri Kaydet", type="primary"):
             db.update_order_basic(order_id, model_name, gender, urun_grubu, deadline.isoformat(),
-                                  kumas_fire, lastik_fire)
+                                  siparis_tarihi.isoformat(), kumas_fire, lastik_fire)
             db.add_log(st.session_state.user['id'], st.session_state.user['username'],
                       'Sipariş Güncellendi', f"{model_name} temel bilgiler (ID: {order_id})")
             st.success("Kaydedildi!")
@@ -927,55 +1059,47 @@ def page_order_edit(order_id):
                                     value=(o['assignment_type'] == 'tam_hizmet'))
         new_status = st.selectbox("Üretim Durumu", ORDER_STATUSES, index=ORDER_STATUSES.index(o['status']))
 
-        color_updates = []
+        fabric_assignments, elastic_assignments, accessory_assignments = [], [], []
         if not full_service:
-            st.markdown("**Renk Bazlı Üretici Ataması**")
-            for col in o['colors']:
-                st.markdown(f"*{col['color_name']}*")
-                cc1, cc2, cc3 = st.columns(3)
-                with cc1:
-                    k_idx = ids.index(col['kumas_manufacturer_id']) if col['kumas_manufacturer_id'] in ids else 0
-                    k_sel = st.selectbox("Kumaş Üreticisi", names, index=k_idx, key=f"k_{order_id}_{col['id']}")
-                    k_id = ids[names.index(k_sel)]
-                with cc2:
-                    l_idx = ids.index(col['lastik_manufacturer_id']) if col['lastik_manufacturer_id'] in ids else 0
-                    l_sel = st.selectbox("Lastik Üreticisi", names, index=l_idx, key=f"l_{order_id}_{col['id']}")
-                    l_id = ids[names.index(l_sel)]
-                with cc3:
-                    a_idx = ids.index(col['aksesuar_manufacturer_id']) if col['aksesuar_manufacturer_id'] in ids else 0
-                    a_sel = st.selectbox("Aksesuar Üreticisi", names, index=a_idx, key=f"a_{order_id}_{col['id']}")
-                    a_id = ids[names.index(a_sel)]
-                color_updates.append({'id': col['id'], 'kumas_manufacturer_id': k_id,
-                                       'lastik_manufacturer_id': l_id, 'aksesuar_manufacturer_id': a_id})
+            if o['fabrics']:
+                st.markdown("**Kumaş Üretici Ataması**")
+                for f in o['fabrics']:
+                    f_idx = ids.index(f['kumas_manufacturer_id']) if f['kumas_manufacturer_id'] in ids else 0
+                    label = f"{f.get('kumas_adi') or 'Kumaş'} — {f.get('kumas_renk') or ''}"
+                    f_sel = st.selectbox(label, names, index=f_idx, key=f"fmf_{order_id}_{f['id']}")
+                    fabric_assignments.append({'id': f['id'], 'manufacturer_id': ids[names.index(f_sel)]})
+            if o['elastics']:
+                st.markdown("**Lastik Üretici Ataması**")
+                for e in o['elastics']:
+                    e_idx = ids.index(e['lastik_manufacturer_id']) if e['lastik_manufacturer_id'] in ids else 0
+                    label = f"{e.get('lastik_tur') or 'Lastik'} — {e.get('lastik_renk') or ''}"
+                    e_sel = st.selectbox(label, names, index=e_idx, key=f"emf_{order_id}_{e['id']}")
+                    elastic_assignments.append({'id': e['id'], 'manufacturer_id': ids[names.index(e_sel)]})
+            if o['accessories']:
+                st.markdown("**Aksesuar Üretici Ataması**")
+                for a in o['accessories']:
+                    a_idx = ids.index(a['aksesuar_manufacturer_id']) if a['aksesuar_manufacturer_id'] in ids else 0
+                    label = f"{a['aksesuar_adi']} — {a.get('aksesuar_renk') or ''}"
+                    a_sel = st.selectbox(label, names, index=a_idx, key=f"amf_{order_id}_{a['id']}")
+                    accessory_assignments.append({'id': a['id'], 'manufacturer_id': ids[names.index(a_sel)]})
 
         if st.form_submit_button("💾 Atamayı Kaydet", type="primary"):
-            db.update_order_assignment(order_id, new_mf_id, full_service, color_updates)
+            db.update_order_assignment(order_id, new_mf_id, full_service,
+                                       fabric_assignments, elastic_assignments, accessory_assignments)
             db.update_order_status(order_id, new_status)
             db.add_log(st.session_state.user['id'], st.session_state.user['username'],
                       'Sipariş Ataması Güncellendi', f"{o['model_name']} (ID: {order_id})")
             st.success("Kaydedildi!")
             st.rerun()
 
-    # --- Maliyet parametreleri & Kutu takibi ---
-    st.markdown('<div class="pk-section-title">💰 Maliyet Parametreleri & 📦 Kutu Takibi</div>', unsafe_allow_html=True)
-    manufacturers = db.get_manufacturers()
-    with st.form(f"edit_costs_{order_id}"):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            para_birimi = st.selectbox("Para Birimi", CURRENCIES,
-                                       index=CURRENCIES.index(o.get('para_birimi', 'TL')))
-            iscilik_birim = st.number_input("İşçilik (birim/parça)", min_value=0.0, value=float(o.get('iscilik_birim') or 0), step=0.5)
-        with c2:
-            genel_gider_yuzde = st.number_input("Genel Gider (%)", min_value=0.0, value=float(o.get('genel_gider_yuzde') or 10), step=1.0)
-            kar_yuzde = st.number_input("Kâr Marjı (%)", min_value=0.0, value=float(o.get('kar_yuzde') or 30), step=1.0)
-        with c3:
-            names, ids = mf_options(manufacturers, "— Belirtilmedi —")
-            k_idx = ids.index(o.get('kutu_manufacturer_id')) if o.get('kutu_manufacturer_id') in ids else 0
-            kutu_mf_sel = st.selectbox("Kutu Üreticisi", names, index=k_idx)
-            kutu_manufacturer_id = ids[names.index(kutu_mf_sel)]
-            kutu_fiyat = st.number_input("Kutu Fiyatı (adet başına)", min_value=0.0, value=float(o.get('kutu_fiyat') or 0), step=0.5)
+    # --- Kutu takibi ---
+    st.markdown('<div class="pk-section-title">📦 Kutu Takibi</div>', unsafe_allow_html=True)
+    with st.form(f"edit_kutu_{order_id}"):
+        names, ids = mf_options(manufacturers, "— Belirtilmedi —")
+        k_idx = ids.index(o.get('kutu_manufacturer_id')) if o.get('kutu_manufacturer_id') in ids else 0
+        kutu_mf_sel = st.selectbox("Kutu Üreticisi", names, index=k_idx)
+        kutu_manufacturer_id = ids[names.index(kutu_mf_sel)]
 
-        st.markdown("**Kutu Sevkiyat Takibi**")
         t1, t2, t3, t4 = st.columns(4)
         with t1:
             kutu_siparis_adet = st.number_input("Sipariş (adet)", min_value=0.0, value=float(o.get('kutu_siparis_adet') or 0))
@@ -986,24 +1110,19 @@ def page_order_edit(order_id):
                 ks_val = datetime.strptime(o['kutu_siparis_tarihi'], '%Y-%m-%d').date() if o.get('kutu_siparis_tarihi') else date.today()
             except Exception:
                 ks_val = date.today()
-            kutu_siparis_tarihi = st.date_input("Sipariş Tarihi", value=ks_val, key="kutu_st")
+            kutu_siparis_tarihi = st.date_input("Sipariş Tarihi", value=ks_val, format=TR_DATE_FMT, key="kutu_st")
         with t4:
             try:
                 kt_val = datetime.strptime(o['kutu_termin_tarihi'], '%Y-%m-%d').date() if o.get('kutu_termin_tarihi') else date.today()
             except Exception:
                 kt_val = date.today()
-            kutu_termin_tarihi = st.date_input("Termin Tarihi", value=kt_val, key="kutu_tt")
+            kutu_termin_tarihi = st.date_input("Termin Tarihi", value=kt_val, format=TR_DATE_FMT, key="kutu_tt")
 
-        if st.form_submit_button("💾 Maliyet & Kutu Bilgisini Kaydet", type="primary"):
-            conn = db.get_conn()
-            conn.execute('''UPDATE orders SET para_birimi=?, iscilik_birim=?, genel_gider_yuzde=?, kar_yuzde=?
-                            WHERE id=?''', (para_birimi, iscilik_birim, genel_gider_yuzde, kar_yuzde, order_id))
-            conn.commit()
-            conn.close()
-            db.update_order_kutu(order_id, kutu_manufacturer_id, kutu_fiyat, kutu_siparis_adet, kutu_gelen_adet,
+        if st.form_submit_button("💾 Kutu Bilgisini Kaydet", type="primary"):
+            db.update_order_kutu(order_id, kutu_manufacturer_id, kutu_siparis_adet, kutu_gelen_adet,
                                  kutu_siparis_tarihi.isoformat(), kutu_termin_tarihi.isoformat())
             db.add_log(st.session_state.user['id'], st.session_state.user['username'],
-                      'Maliyet/Kutu Güncellendi', f"{o['model_name']} (ID: {order_id})")
+                      'Kutu Güncellendi', f"{o['model_name']} (ID: {order_id})")
             st.success("Kaydedildi!")
             st.rerun()
 
@@ -1012,163 +1131,230 @@ def page_order_edit(order_id):
     if st.session_state.get(f'show_irs_kutu_{order_id}'):
         render_irsaliye_form(order_id, None, "Kutu", o.get('kutu_manufacturer_name') or '', "adet")
 
-    # --- Renk bazlı malzeme / fotoğraf / kumaş takip ---
-    st.markdown('<div class="pk-section-title">Renk / Malzeme / Kumaş Takibi</div>', unsafe_allow_html=True)
-    render_fabric_tracking_table(o['colors'])
-
-    fabrics = db.get_fabrics()
-    elastics = db.get_elastics()
-    fabric_labels = ["— Tanımlı değil —"] + [f"{f['name']} ({f['kumas_turu']})" for f in fabrics]
-    fabric_ids = [None] + [f['id'] for f in fabrics]
-    elastic_labels = ["— Tanımlı değil —"] + [f"{e['tur']} - {e['ad']} ({e['boyut']})" for e in elastics]
-    elastic_ids = [None] + [e['id'] for e in elastics]
-
-    for col in o['colors']:
-        with st.expander(f"🎨 {col['color_name']} — malzeme ve kumaş takip detayı"):
-            with st.form(f"edit_color_{col['id']}"):
-                st.markdown("**Kumaş**")
+    # --- Kumaş satırları ---
+    st.markdown('<div class="pk-section-title">🧵 Kumaş</div>', unsafe_allow_html=True)
+    render_fabric_tracking_table(o['fabrics'])
+    for f in o['fabrics']:
+        with st.expander(f"{f.get('kumas_adi') or 'Kumaş'} — {f.get('kumas_renk') or ''}"):
+            with st.form(f"edit_fabric_{f['id']}"):
                 r1, r2 = st.columns(2)
                 with r1:
-                    f_idx = fabric_ids.index(col.get('kumas_fabric_id')) if col.get('kumas_fabric_id') in fabric_ids else 0
-                    fsel = st.selectbox("Kumaş", fabric_labels, index=f_idx, key=f"ef_{col['id']}")
-                    new_fabric_id = fabric_ids[fabric_labels.index(fsel)]
-                    kumas_renk = st.text_input("Kumaş Rengi", value=col.get('kumas_renk') or '', key=f"ekr_{col['id']}")
+                    f_idx = fabric_ids_m.index(f.get('kumas_fabric_id')) if f.get('kumas_fabric_id') in fabric_ids_m else 0
+                    fsel = st.selectbox("Kumaş", fabric_labels, index=f_idx, key=f"ef_{f['id']}")
+                    new_fabric_id = fabric_ids_m[fabric_labels.index(fsel)]
+                    kumas_renk = st.text_input("Renk", value=f.get('kumas_renk') or '', key=f"ekr_{f['id']}")
                 with r2:
-                    kumas_foto_file = st.file_uploader("Kumaş Fotoğrafı (değiştir)", type=['png', 'jpg', 'jpeg'],
-                                                        key=f"ekf_{col['id']}")
-                    show_photo(col.get('kumas_foto'), "Mevcut")
+                    kumas_foto_file = st.file_uploader("Fotoğraf (değiştir)", type=['png', 'jpg', 'jpeg'], key=f"ekf_{f['id']}")
+                    show_photo(f.get('kumas_foto'), "Mevcut")
 
-                st.markdown("**Kumaş Tedarik Takibi**")
+                st.markdown("**Tedarik Takibi**")
                 t1, t2, t3, t4 = st.columns(4)
                 with t1:
-                    siparis_kg = st.number_input("Sipariş (kg)", min_value=0.0, value=float(col.get('kumas_siparis_kg') or 0),
-                                                  key=f"esk_{col['id']}")
+                    siparis_kg = st.number_input("Sipariş (kg)", min_value=0.0, value=float(f.get('kumas_siparis_kg') or 0), key=f"esk_{f['id']}")
                 with t2:
-                    gelen_kg = st.number_input("Gelen (kg)", min_value=0.0, value=float(col.get('kumas_gelen_kg') or 0),
-                                                key=f"egk_{col['id']}")
+                    gelen_kg = st.number_input("Gelen (kg)", min_value=0.0, value=float(f.get('kumas_gelen_kg') or 0), key=f"egk_{f['id']}")
                 with t3:
                     try:
-                        st_val = datetime.strptime(col['kumas_siparis_tarihi'], '%Y-%m-%d').date() if col.get('kumas_siparis_tarihi') else date.today()
+                        st_val = datetime.strptime(f['kumas_siparis_tarihi'], '%Y-%m-%d').date() if f.get('kumas_siparis_tarihi') else date.today()
                     except Exception:
                         st_val = date.today()
-                    siparis_tarihi = st.date_input("Sipariş Tarihi", value=st_val, key=f"est_{col['id']}")
+                    siparis_tarihi = st.date_input("Sipariş T.", value=st_val, format=TR_DATE_FMT, key=f"est_{f['id']}")
                 with t4:
                     try:
-                        tt_val = datetime.strptime(col['kumas_termin_tarihi'], '%Y-%m-%d').date() if col.get('kumas_termin_tarihi') else date.today()
+                        tt_val = datetime.strptime(f['kumas_termin_tarihi'], '%Y-%m-%d').date() if f.get('kumas_termin_tarihi') else date.today()
                     except Exception:
                         tt_val = date.today()
-                    termin_tarihi = st.date_input("Termin Tarihi", value=tt_val, key=f"ett_{col['id']}")
+                    termin_tarihi = st.date_input("Termin", value=tt_val, format=TR_DATE_FMT, key=f"ett_{f['id']}")
 
-                st.markdown("---")
-                st.markdown("**Lastik**")
-                r3, r4 = st.columns(2)
-                with r3:
-                    e_idx = elastic_ids.index(col.get('lastik_elastic_id')) if col.get('lastik_elastic_id') in elastic_ids else 0
-                    esel = st.selectbox("Lastik", elastic_labels, index=e_idx, key=f"ee_{col['id']}")
-                    new_elastic_id = elastic_ids[elastic_labels.index(esel)]
-                    lastik_renk = st.text_input("Lastik Rengi", value=col.get('lastik_renk') or '', key=f"elr_{col['id']}")
-                with r4:
-                    lastik_foto_file = st.file_uploader("Lastik Fotoğrafı (değiştir)", type=['png', 'jpg', 'jpeg'],
-                                                         key=f"elf_{col['id']}")
-                    show_photo(col.get('lastik_foto'), "Mevcut")
+                if not full_service:
+                    names2, ids2 = mf_options(manufacturers, "— Atama yok —")
+                    fm_idx = ids2.index(f.get('kumas_manufacturer_id')) if f.get('kumas_manufacturer_id') in ids2 else 0
+                    fm_sel = st.selectbox("Üretici", names2, index=fm_idx, key=f"efmf_{f['id']}")
+                    row_manufacturer_id = ids2[names2.index(fm_sel)]
+                else:
+                    row_manufacturer_id = f.get('kumas_manufacturer_id')
+                    st.caption(f"Üretici (tam hizmet): {o.get('manufacturer_name') or '—'}")
 
-                st.markdown("**Lastik Tedarik Takibi**")
-                lt1, lt2, lt3, lt4, lt5 = st.columns(5)
-                with lt1:
-                    lastik_fiyat = st.number_input("Fiyat (mt)", min_value=0.0, value=float(col.get('lastik_fiyat_mt') or 0), key=f"elp_{col['id']}")
-                with lt2:
-                    lastik_siparis_mt = st.number_input("Sipariş (mt)", min_value=0.0, value=float(col.get('lastik_siparis_mt') or 0), key=f"elsm_{col['id']}")
-                with lt3:
-                    lastik_gelen_mt = st.number_input("Gelen (mt)", min_value=0.0, value=float(col.get('lastik_gelen_mt') or 0), key=f"elgm_{col['id']}")
-                with lt4:
-                    try:
-                        ls_val = datetime.strptime(col['lastik_siparis_tarihi'], '%Y-%m-%d').date() if col.get('lastik_siparis_tarihi') else date.today()
-                    except Exception:
-                        ls_val = date.today()
-                    lastik_siparis_tarihi = st.date_input("Sipariş T.", value=ls_val, key=f"elst_{col['id']}")
-                with lt5:
-                    try:
-                        lt_val = datetime.strptime(col['lastik_termin_tarihi'], '%Y-%m-%d').date() if col.get('lastik_termin_tarihi') else date.today()
-                    except Exception:
-                        lt_val = date.today()
-                    lastik_termin_tarihi = st.date_input("Termin", value=lt_val, key=f"eltt_{col['id']}")
-
-                st.markdown("---")
-                st.markdown("**Aksesuar**")
-                r5, r6 = st.columns(2)
-                with r5:
-                    aksesuar_adi = st.text_input("Aksesuar Adı", value=col.get('aksesuar_adi') or '', key=f"eaa_{col['id']}")
-                    aksesuar_renk = st.text_input("Aksesuar Rengi", value=col.get('aksesuar_renk') or '', key=f"ear_{col['id']}")
-                with r6:
-                    aksesuar_foto_file = st.file_uploader("Aksesuar Fotoğrafı (değiştir)", type=['png', 'jpg', 'jpeg'],
-                                                           key=f"eaf_{col['id']}")
-                    show_photo(col.get('aksesuar_foto'), "Mevcut")
-
-                st.markdown("**Aksesuar Tedarik Takibi**")
-                at1, at2, at3, at4, at5 = st.columns(5)
-                with at1:
-                    aksesuar_fiyat = st.number_input("Fiyat (adet)", min_value=0.0, value=float(col.get('aksesuar_fiyat') or 0), key=f"eap_{col['id']}")
-                with at2:
-                    aksesuar_siparis_adet = st.number_input("Sipariş (adet)", min_value=0.0, value=float(col.get('aksesuar_siparis_adet') or 0), key=f"easa_{col['id']}")
-                with at3:
-                    aksesuar_gelen_adet = st.number_input("Gelen (adet)", min_value=0.0, value=float(col.get('aksesuar_gelen_adet') or 0), key=f"eaga_{col['id']}")
-                with at4:
-                    try:
-                        as_val = datetime.strptime(col['aksesuar_siparis_tarihi'], '%Y-%m-%d').date() if col.get('aksesuar_siparis_tarihi') else date.today()
-                    except Exception:
-                        as_val = date.today()
-                    aksesuar_siparis_tarihi = st.date_input("Sipariş T.", value=as_val, key=f"east_{col['id']}")
-                with at5:
-                    try:
-                        att_val = datetime.strptime(col['aksesuar_termin_tarihi'], '%Y-%m-%d').date() if col.get('aksesuar_termin_tarihi') else date.today()
-                    except Exception:
-                        att_val = date.today()
-                    aksesuar_termin_tarihi = st.date_input("Termin", value=att_val, key=f"eatt_{col['id']}")
-
-                if st.form_submit_button("💾 Bu Rengi Kaydet", type="primary"):
-                    conn = db.get_conn()
-                    conn.execute('''UPDATE order_colors SET kumas_fabric_id=?, kumas_renk=?, lastik_elastic_id=?,
-                                    lastik_renk=?, aksesuar_adi=?, aksesuar_renk=? WHERE id=?''',
-                                (new_fabric_id, kumas_renk, new_elastic_id, lastik_renk,
-                                 aksesuar_adi, aksesuar_renk, col['id']))
-                    conn.commit()
-                    conn.close()
-                    db.update_fabric_tracking(col['id'], siparis_kg, gelen_kg,
-                                              siparis_tarihi.isoformat(), termin_tarihi.isoformat())
-                    if new_elastic_id:
-                        db.update_color_lastik_tracking(col['id'], lastik_fiyat, lastik_siparis_mt, lastik_gelen_mt,
-                                                        lastik_siparis_tarihi.isoformat(), lastik_termin_tarihi.isoformat())
-                    else:
-                        db.update_color_lastik_tracking(col['id'], 0, lastik_siparis_mt, lastik_gelen_mt,
-                                                        lastik_siparis_tarihi.isoformat(), lastik_termin_tarihi.isoformat())
-                    db.update_color_aksesuar_tracking(col['id'], aksesuar_fiyat, aksesuar_siparis_adet, aksesuar_gelen_adet,
-                                                      aksesuar_siparis_tarihi.isoformat(), aksesuar_termin_tarihi.isoformat())
-                    kpath = save_uploaded_file(kumas_foto_file, f"order_{order_id}_color_{col['id']}_kumas") if kumas_foto_file else None
-                    lpath = save_uploaded_file(lastik_foto_file, f"order_{order_id}_color_{col['id']}_lastik") if lastik_foto_file else None
-                    apath = save_uploaded_file(aksesuar_foto_file, f"order_{order_id}_color_{col['id']}_aksesuar") if aksesuar_foto_file else None
-                    if kpath or lpath or apath:
-                        db.set_color_photos(col['id'], kumas_foto=kpath, lastik_foto=lpath, aksesuar_foto=apath)
+                if st.form_submit_button("💾 Kaydet", type="primary"):
+                    db.update_fabric_row(f['id'], new_fabric_id, kumas_renk, row_manufacturer_id,
+                                         siparis_kg, gelen_kg, siparis_tarihi.isoformat(), termin_tarihi.isoformat())
+                    if kumas_foto_file:
+                        path = save_uploaded_file(kumas_foto_file, f"order_{order_id}_fabric_{f['id']}")
+                        db.set_fabric_photo(f['id'], path)
                     db.add_log(st.session_state.user['id'], st.session_state.user['username'],
-                              'Malzeme Güncellendi', f"{o['model_name']} - {col['color_name']} (ID: {order_id})")
+                              'Kumaş Güncellendi', f"{o['model_name']} (ID: {order_id})")
                     st.success("Kaydedildi!")
                     st.rerun()
 
-            irs1, irs2, irs3 = st.columns(3)
+            irs1, irs2 = st.columns(2)
             with irs1:
-                if st.button("🚚 Kumaş İrsaliyesi", key=f"irs_k_{col['id']}"):
-                    st.session_state[f'show_irs_kumas_{col["id"]}'] = True
+                if st.button("🚚 İrsaliye Oluştur", key=f"irs_fab_{f['id']}"):
+                    st.session_state[f'show_irs_fab_{f["id"]}'] = True
             with irs2:
-                if st.button("🚚 Lastik İrsaliyesi", key=f"irs_l_{col['id']}"):
-                    st.session_state[f'show_irs_lastik_{col["id"]}'] = True
-            with irs3:
-                if st.button("🚚 Aksesuar İrsaliyesi", key=f"irs_a_{col['id']}"):
-                    st.session_state[f'show_irs_aksesuar_{col["id"]}'] = True
-            if st.session_state.get(f'show_irs_kumas_{col["id"]}'):
-                render_irsaliye_form(order_id, col['id'], "Kumaş", col.get('kumas_manufacturer_name') or '', "kg")
-            if st.session_state.get(f'show_irs_lastik_{col["id"]}'):
-                render_irsaliye_form(order_id, col['id'], "Lastik", col.get('lastik_manufacturer_name') or '', "mt")
-            if st.session_state.get(f'show_irs_aksesuar_{col["id"]}'):
-                render_irsaliye_form(order_id, col['id'], "Aksesuar", col.get('aksesuar_manufacturer_name') or '', "adet")
+                if st.button("🗑️ Bu Kumaş Satırını Sil", key=f"del_fab_{f['id']}"):
+                    db.delete_fabric_row(f['id'])
+                    st.rerun()
+            if st.session_state.get(f'show_irs_fab_{f["id"]}'):
+                render_irsaliye_form(order_id, f['id'], "Kumaş", f.get('kumas_manufacturer_name') or '', "kg")
+
+    if st.button("➕ Yeni Kumaş Satırı Ekle", key=f"add_fab_edit_{order_id}"):
+        db.add_fabric_row(order_id)
+        st.rerun()
+
+    # --- Lastik satırları ---
+    st.markdown('<div class="pk-section-title">➰ Lastik</div>', unsafe_allow_html=True)
+    for e in o['elastics']:
+        with st.expander(f"{e.get('lastik_tur') or 'Lastik'} — {e.get('lastik_renk') or ''}"):
+            with st.form(f"edit_elastic_{e['id']}"):
+                r1, r2 = st.columns(2)
+                with r1:
+                    e_idx = elastic_ids_m.index(e.get('lastik_elastic_id')) if e.get('lastik_elastic_id') in elastic_ids_m else 0
+                    esel = st.selectbox("Lastik", elastic_labels, index=e_idx, key=f"ee_{e['id']}")
+                    new_elastic_id = elastic_ids_m[elastic_labels.index(esel)]
+                    lastik_renk = st.text_input("Renk", value=e.get('lastik_renk') or '', key=f"elr_{e['id']}")
+                with r2:
+                    lastik_foto_file = st.file_uploader("Fotoğraf (değiştir)", type=['png', 'jpg', 'jpeg'], key=f"elf_{e['id']}")
+                    show_photo(e.get('lastik_foto'), "Mevcut")
+
+                sel_elastic = next((el for el in elastics_master if el['id'] == new_elastic_id), None)
+                is_raporlu = sel_elastic and sel_elastic['tur'] == RAPORLU_LASTIK
+
+                st.markdown("**Tedarik Takibi**")
+                if is_raporlu:
+                    st.caption("📏 Raporlu lastik — adet bazlı takip")
+                    t1, t2 = st.columns(2)
+                    with t1:
+                        siparis_adet = st.number_input("Sipariş (adet)", min_value=0.0, value=float(e.get('lastik_siparis_adet') or 0), key=f"elsa_{e['id']}")
+                    with t2:
+                        gelen_adet = st.number_input("Gelen (adet)", min_value=0.0, value=float(e.get('lastik_gelen_adet') or 0), key=f"elga_{e['id']}")
+                    siparis_cm, gelen_cm = e.get('lastik_siparis_cm') or 0, e.get('lastik_gelen_cm') or 0
+                else:
+                    st.caption("📏 CM bazlı takip")
+                    t1, t2 = st.columns(2)
+                    with t1:
+                        siparis_cm = st.number_input("Sipariş (cm)", min_value=0.0, value=float(e.get('lastik_siparis_cm') or 0), key=f"elsc_{e['id']}")
+                    with t2:
+                        gelen_cm = st.number_input("Gelen (cm)", min_value=0.0, value=float(e.get('lastik_gelen_cm') or 0), key=f"elgc_{e['id']}")
+                    siparis_adet, gelen_adet = e.get('lastik_siparis_adet') or 0, e.get('lastik_gelen_adet') or 0
+
+                t3, t4 = st.columns(2)
+                with t3:
+                    try:
+                        ls_val = datetime.strptime(e['lastik_siparis_tarihi'], '%Y-%m-%d').date() if e.get('lastik_siparis_tarihi') else date.today()
+                    except Exception:
+                        ls_val = date.today()
+                    lastik_siparis_tarihi = st.date_input("Sipariş T.", value=ls_val, format=TR_DATE_FMT, key=f"elst_{e['id']}")
+                with t4:
+                    try:
+                        lt_val = datetime.strptime(e['lastik_termin_tarihi'], '%Y-%m-%d').date() if e.get('lastik_termin_tarihi') else date.today()
+                    except Exception:
+                        lt_val = date.today()
+                    lastik_termin_tarihi = st.date_input("Termin", value=lt_val, format=TR_DATE_FMT, key=f"eltt_{e['id']}")
+
+                if not full_service:
+                    names2, ids2 = mf_options(manufacturers, "— Atama yok —")
+                    em_idx = ids2.index(e.get('lastik_manufacturer_id')) if e.get('lastik_manufacturer_id') in ids2 else 0
+                    em_sel = st.selectbox("Üretici", names2, index=em_idx, key=f"eemf_{e['id']}")
+                    row_manufacturer_id = ids2[names2.index(em_sel)]
+                else:
+                    row_manufacturer_id = e.get('lastik_manufacturer_id')
+                    st.caption(f"Üretici (tam hizmet): {o.get('manufacturer_name') or '—'}")
+
+                if st.form_submit_button("💾 Kaydet", type="primary"):
+                    db.update_elastic_row(e['id'], new_elastic_id, lastik_renk, row_manufacturer_id,
+                                          siparis_cm, gelen_cm, siparis_adet, gelen_adet,
+                                          lastik_siparis_tarihi.isoformat(), lastik_termin_tarihi.isoformat())
+                    if lastik_foto_file:
+                        path = save_uploaded_file(lastik_foto_file, f"order_{order_id}_elastic_{e['id']}")
+                        db.set_elastic_photo(e['id'], path)
+                    db.add_log(st.session_state.user['id'], st.session_state.user['username'],
+                              'Lastik Güncellendi', f"{o['model_name']} (ID: {order_id})")
+                    st.success("Kaydedildi!")
+                    st.rerun()
+
+            irs1, irs2 = st.columns(2)
+            with irs1:
+                if st.button("🚚 İrsaliye Oluştur", key=f"irs_el_{e['id']}"):
+                    st.session_state[f'show_irs_el_{e["id"]}'] = True
+            with irs2:
+                if st.button("🗑️ Bu Lastik Satırını Sil", key=f"del_el_{e['id']}"):
+                    db.delete_elastic_row(e['id'])
+                    st.rerun()
+            if st.session_state.get(f'show_irs_el_{e["id"]}'):
+                birim = 'adet' if e['is_raporlu'] else 'cm'
+                render_irsaliye_form(order_id, e['id'], "Lastik", e.get('lastik_manufacturer_name') or '', birim)
+
+    if st.button("➕ Yeni Lastik Satırı Ekle", key=f"add_el_edit_{order_id}"):
+        db.add_elastic_row(order_id)
+        st.rerun()
+
+    # --- Aksesuar satırları ---
+    st.markdown('<div class="pk-section-title">🔘 Aksesuar</div>', unsafe_allow_html=True)
+    for a in o['accessories']:
+        with st.expander(f"{a['aksesuar_adi']} — {a.get('aksesuar_renk') or ''}"):
+            with st.form(f"edit_accessory_{a['id']}"):
+                r1, r2 = st.columns(2)
+                with r1:
+                    aksesuar_adi = st.text_input("Aksesuar Adı", value=a['aksesuar_adi'], key=f"eaa_{a['id']}")
+                    aksesuar_renk = st.text_input("Renk", value=a.get('aksesuar_renk') or '', key=f"ear_{a['id']}")
+                with r2:
+                    aksesuar_foto_file = st.file_uploader("Fotoğraf (değiştir)", type=['png', 'jpg', 'jpeg'], key=f"eaf_{a['id']}")
+                    show_photo(a.get('aksesuar_foto'), "Mevcut")
+
+                st.markdown("**Tedarik Takibi**")
+                t1, t2, t3, t4 = st.columns(4)
+                with t1:
+                    siparis_adet = st.number_input("Sipariş (adet)", min_value=0.0, value=float(a.get('aksesuar_siparis_adet') or 0), key=f"easa_{a['id']}")
+                with t2:
+                    gelen_adet = st.number_input("Gelen (adet)", min_value=0.0, value=float(a.get('aksesuar_gelen_adet') or 0), key=f"eaga_{a['id']}")
+                with t3:
+                    try:
+                        as_val = datetime.strptime(a['aksesuar_siparis_tarihi'], '%Y-%m-%d').date() if a.get('aksesuar_siparis_tarihi') else date.today()
+                    except Exception:
+                        as_val = date.today()
+                    aksesuar_siparis_tarihi = st.date_input("Sipariş T.", value=as_val, format=TR_DATE_FMT, key=f"east_{a['id']}")
+                with t4:
+                    try:
+                        att_val = datetime.strptime(a['aksesuar_termin_tarihi'], '%Y-%m-%d').date() if a.get('aksesuar_termin_tarihi') else date.today()
+                    except Exception:
+                        att_val = date.today()
+                    aksesuar_termin_tarihi = st.date_input("Termin", value=att_val, format=TR_DATE_FMT, key=f"eatt_{a['id']}")
+
+                if not full_service:
+                    names2, ids2 = mf_options(manufacturers, "— Atama yok —")
+                    am_idx = ids2.index(a.get('aksesuar_manufacturer_id')) if a.get('aksesuar_manufacturer_id') in ids2 else 0
+                    am_sel = st.selectbox("Üretici", names2, index=am_idx, key=f"eamf_{a['id']}")
+                    row_manufacturer_id = ids2[names2.index(am_sel)]
+                else:
+                    row_manufacturer_id = a.get('aksesuar_manufacturer_id')
+                    st.caption(f"Üretici (tam hizmet): {o.get('manufacturer_name') or '—'}")
+
+                if st.form_submit_button("💾 Kaydet", type="primary"):
+                    db.update_accessory_row(a['id'], aksesuar_adi, aksesuar_renk, row_manufacturer_id,
+                                            siparis_adet, gelen_adet, aksesuar_siparis_tarihi.isoformat(),
+                                            aksesuar_termin_tarihi.isoformat())
+                    if aksesuar_foto_file:
+                        path = save_uploaded_file(aksesuar_foto_file, f"order_{order_id}_accessory_{a['id']}")
+                        db.set_accessory_photo(a['id'], path)
+                    db.add_log(st.session_state.user['id'], st.session_state.user['username'],
+                              'Aksesuar Güncellendi', f"{o['model_name']} (ID: {order_id})")
+                    st.success("Kaydedildi!")
+                    st.rerun()
+
+            irs1, irs2 = st.columns(2)
+            with irs1:
+                if st.button("🚚 İrsaliye Oluştur", key=f"irs_ak_{a['id']}"):
+                    st.session_state[f'show_irs_ak_{a["id"]}'] = True
+            with irs2:
+                if st.button("🗑️ Bu Aksesuar Satırını Sil", key=f"del_ak_{a['id']}"):
+                    db.delete_accessory_row(a['id'])
+                    st.rerun()
+            if st.session_state.get(f'show_irs_ak_{a["id"]}'):
+                render_irsaliye_form(order_id, a['id'], "Aksesuar", a.get('aksesuar_manufacturer_name') or '', "adet")
+
+    if st.button("➕ Yeni Aksesuar Satırı Ekle", key=f"add_ak_edit_{order_id}"):
+        db.add_accessory_row(order_id, "Yeni Aksesuar")
+        st.rerun()
 
     # --- Silme ---
     st.markdown('<div class="pk-section-title">Tehlikeli Bölge</div>', unsafe_allow_html=True)
@@ -1195,126 +1381,26 @@ def page_order_edit(order_id):
 
 
 # ======================================================================
-# EXCEL İŞLEMLERİ & YEDEKLEME
-# ======================================================================
-def page_excel_yedek():
-    page_header("📤 Excel İşlemleri & Yedekleme", "Toplu dışa/içe aktarma ve tam sistem yedeği")
-
-    if not HAS_EXCEL:
-        st.warning("Excel desteği için `openpyxl` kütüphanesi kurulu değil. requirements.txt içinde mevcuttur, "
-                  "ortamınızda `pip install openpyxl` çalıştırmanız gerekebilir.")
-
-    st.markdown("### 📥 Siparişleri Excel Olarak İndir")
-    orders = db.get_orders_overview(assigned=None, include_completed=True)
-    if orders and HAS_EXCEL:
-        rows = []
-        for o in orders:
-            row = {
-                'ID': o['id'], 'Model Kodu': o.get('model_kodu'), 'Ürün Adı': o['model_name'],
-                'Cinsiyet': o['gender'], 'Ürün Grubu': o.get('urun_grubu'),
-                'Üretici': o.get('manufacturer_name') or '-', 'Durum': o['status'],
-                'Termin': o.get('deadline'), 'Paket': o['package_size'],
-                'Toplam Kutu': o['total_boxes'], 'Toplam Adet': o['total_quantity'],
-                'Kumaş (kg)': o['kumas_kg_total'], 'Lastik (mt)': o['lastik_mt_total'],
-                'Para Birimi': o.get('para_birimi'),
-            }
-            for s in o['sizes']:
-                row[f"Adet_{s['size']}"] = s['box_qty'] * o['package_size']
-            costs = db.compute_order_costs(o)
-            row['Toplam Maliyet'] = costs['toplam_maliyet_pb']
-            row['Satış Fiyatı'] = costs['satis_toplam_pb']
-            row['Kâr'] = costs['kar_toplam_pb']
-            rows.append(row)
-        df = pd.DataFrame(rows)
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False)
-        st.download_button("📥 Tüm Siparişleri Excel İndir", output.getvalue(),
-                          file_name=f"siparisler_{date.today().isoformat()}.xlsx",
-                          mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    elif not orders:
-        st.info("Henüz sipariş yok.")
-
-    st.markdown("---")
-    st.markdown("### 📤 Excel'den Toplu Sipariş Yükle")
-    st.caption("Excel dosyanızda en az şu kolonlar bulunmalı: Ürün Adı, Cinsiyet, Ürün Grubu, Paket, Adet_XS...Adet_3XL. "
-              "Yüklenen siparişler reçete kütüphanesine göre otomatik hesaplanarak 'Planlama Bekleyen' listesine eklenir.")
-    uploaded = st.file_uploader("Excel Dosyası (.xlsx)", type=['xlsx'])
-    if uploaded and HAS_EXCEL:
-        try:
-            df_up = pd.read_excel(uploaded)
-            st.dataframe(df_up.head(10), width='stretch')
-            st.info(f"{len(df_up)} satır bulundu.")
-            if st.button("✅ İçe Aktar"):
-                success_count = 0
-                for _, row in df_up.iterrows():
-                    try:
-                        gender = str(row.get('Cinsiyet', 'Kadın'))
-                        urun_grubu = str(row.get('Ürün Grubu', ''))
-                        package_size = int(row.get('Paket', 1) or 1)
-                        recipe = db.get_recipe(gender, urun_grubu)
-                        sizes_payload = []
-                        for size in SIZES:
-                            col = f"Adet_{size}"
-                            adet = int(row.get(col, 0) or 0)
-                            box_qty = adet // package_size if package_size else adet
-                            if box_qty > 0:
-                                r = recipe.get(size, {'kumas_gr': 0, 'lastik_adet': 0, 'lastik_mt': 0})
-                                sizes_payload.append({'size': size, 'box_qty': box_qty, **r})
-                        if not sizes_payload:
-                            continue
-                        colors_payload = [{'color_name': str(row.get('Renk', 'Genel'))}]
-                        db.add_order(str(row.get('Ürün Adı', 'Yeni Model')), gender, urun_grubu, package_size,
-                                    3.0, 3.0, str(row.get('Termin', date.today().isoformat())),
-                                    sizes_payload, colors_payload, st.session_state.user['id'])
-                        success_count += 1
-                    except Exception as e:
-                        st.warning(f"Satır atlandı: {e}")
-                db.add_log(st.session_state.user['id'], st.session_state.user['username'],
-                          'Excel İçe Aktarma', f"{success_count} sipariş eklendi")
-                st.success(f"{success_count} sipariş içe aktarıldı!")
-                st.rerun()
-        except Exception as e:
-            st.error(f"Excel okuma hatası: {e}")
-
-    st.markdown("---")
-    st.markdown("### 💾 Tüm Verileri Yedekle (Zip)")
-    st.caption("Tüm veritabanı tablolarını JSON olarak ve yüklenmiş fotoğrafları içeren bir zip dosyası indirin.")
-    if st.button("💾 Yedek Zip Oluştur"):
-        data = db.export_all_data()
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w") as z:
-            for table, rows in data.items():
-                z.writestr(f"data/{table}.json", json.dumps(rows, ensure_ascii=False, indent=2, default=str))
-            if os.path.isdir(UPLOAD_DIR):
-                for fname in os.listdir(UPLOAD_DIR):
-                    fpath = os.path.join(UPLOAD_DIR, fname)
-                    if os.path.isfile(fpath):
-                        z.write(fpath, arcname=f"uploads/{fname}")
-        zip_buffer.seek(0)
-        st.download_button("⬇️ Zip İndir", zip_buffer.getvalue(),
-                          file_name=f"paulkenzie_yedek_{date.today().isoformat()}.zip", mime="application/zip")
-
-
-# ======================================================================
 # AYARLAR (Admin only)
 # ======================================================================
 def page_ayarlar():
-    page_header("⚙️ Ayarlar", "Ana verileri (üretici, ürün grubu, kumaş, lastik, reçete) yönetin")
+    page_header("⚙️ Ayarlar", "Ana verileri (üretici, ürün adı/grubu, kumaş, lastik, reçete) yönetin")
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
-        ["🏭 Üreticiler", "🏷️ Ürün Grupları", "🧵 Kumaşlar", "➰ Lastikler",
-         "📐 Reçeteler", "💱 Kur & Firma", "👤 Kullanıcılar", "🧾 Log"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
+        ["🏭 Üreticiler", "🏷️ Ürün Grupları", "🏷️ Ürün Adları", "🧵 Kumaşlar", "➰ Lastikler",
+         "📐 Reçeteler", "🏢 Firma", "👤 Kullanıcılar", "🧾 Log"])
 
     # --- Üreticiler ---
     with tab1:
         with st.form("add_manufacturer"):
-            c1, c2 = st.columns(2)
+            c1, c2, c3, c4 = st.columns(4)
             with c1:
                 new_mf = st.text_input("Üretici Adı")
-                contact_person = st.text_input("İletişim Kişisi")
             with c2:
+                contact_person = st.text_input("İletişim Kişisi")
+            with c3:
                 phone = st.text_input("Telefon")
+            with c4:
                 email = st.text_input("E-posta")
             submitted = st.form_submit_button("Ekle", width='stretch', type="primary")
             if submitted and new_mf.strip():
@@ -1333,11 +1419,12 @@ def page_ayarlar():
             for mf in manufacturers:
                 with st.expander(f"{mf['name']}"):
                     with st.form(f"edit_mf_{mf['id']}"):
-                        c1, c2 = st.columns(2)
+                        c1, c2, c3 = st.columns(3)
                         with c1:
                             cp = st.text_input("İletişim Kişisi", value=mf.get('contact_person') or '', key=f"mfcp_{mf['id']}")
-                            ph = st.text_input("Telefon", value=mf.get('phone') or '', key=f"mfph_{mf['id']}")
                         with c2:
+                            ph = st.text_input("Telefon", value=mf.get('phone') or '', key=f"mfph_{mf['id']}")
+                        with c3:
                             em = st.text_input("E-posta", value=mf.get('email') or '', key=f"mfem_{mf['id']}")
                         if st.form_submit_button("💾 Kaydet"):
                             db.update_manufacturer(mf['id'], cp, ph, em)
@@ -1356,19 +1443,22 @@ def page_ayarlar():
         st.caption("Örnek: Kadın için string, cheeky, slip, boyshort, short, pantolon, triangle bra; "
                   "Erkek için boxer, slip, short, pantolon.")
         if st.button("⚡ Varsayılan Ürün Gruplarını Ekle"):
-            for gender, names in DEFAULT_PRODUCT_GROUPS.items():
-                for name in names:
-                    db.add_product_group(gender, name)
+            for gender, gnames in DEFAULT_PRODUCT_GROUPS.items():
+                for gname in gnames:
+                    db.add_product_group(gender, gname)
             st.success("Varsayılan ürün grupları eklendi!")
             st.rerun()
 
         with st.form("add_product_group"):
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns([1, 2, 1])
             with c1:
                 pg_gender = st.radio("Cinsiyet", GENDERS, horizontal=True)
             with c2:
                 pg_name = st.text_input("Ürün Grubu Adı (ör. String, Boxer)")
-            if st.form_submit_button("Ekle", width='stretch', type="primary"):
+            with c3:
+                st.write("")
+                submit_pg = st.form_submit_button("Ekle", width='stretch', type="primary")
+            if submit_pg:
                 if pg_name.strip():
                     if db.add_product_group(pg_gender, pg_name.strip()):
                         st.success(f"'{pg_name.strip()}' eklendi!")
@@ -1390,28 +1480,85 @@ def page_ayarlar():
             else:
                 st.caption("Henüz ürün grubu yok.")
 
-    # --- Kumaşlar ---
+    # --- Ürün Adları ---
     with tab3:
+        st.caption("Belirli model isimleri tanımlayın (ör. 'Zebra Boxer'); Yeni Sipariş'te bu ad seçildiğinde "
+                  "cinsiyet ve ürün grubu otomatik doldurulur.")
+        with st.form("add_product_name"):
+            c1, c2, c3, c4 = st.columns([2, 1, 2, 1])
+            with c1:
+                pn_name = st.text_input("Ürün Adı")
+            with c2:
+                pn_gender = st.radio("Cinsiyet", GENDERS, horizontal=True, key="pn_gender_add")
+            with c3:
+                pn_groups = db.get_product_groups(pn_gender)
+                pn_urun_grubu = st.selectbox("Ürün Grubu", [g['name'] for g in pn_groups] if pn_groups else ["—"])
+            with c4:
+                st.write("")
+                submit_pn = st.form_submit_button("Ekle", width='stretch', type="primary")
+            if submit_pn:
+                if pn_name.strip() and pn_groups:
+                    if db.add_product_name(pn_name.strip(), pn_gender, pn_urun_grubu):
+                        st.success(f"'{pn_name.strip()}' eklendi!")
+                        st.rerun()
+                    else:
+                        st.error("Bu ürün adı zaten mevcut!")
+                elif not pn_groups:
+                    st.error("Önce Ürün Grupları sekmesinden bu cinsiyet için grup ekleyin.")
+
+        st.markdown("---")
+        st.markdown("#### Mevcut Ürün Adları")
+        product_names = db.get_product_names()
+        if product_names:
+            for pn in product_names:
+                with st.expander(f"{pn['name']} — {pn['gender']} / {pn['urun_grubu']}"):
+                    with st.form(f"edit_pn_{pn['id']}"):
+                        c1, c2, c3 = st.columns(3)
+                        with c1:
+                            new_name = st.text_input("Ürün Adı", value=pn['name'], key=f"pnn_{pn['id']}")
+                        with c2:
+                            new_gender = st.radio("Cinsiyet", GENDERS, horizontal=True,
+                                                  index=GENDERS.index(pn['gender']) if pn['gender'] in GENDERS else 0,
+                                                  key=f"png_{pn['id']}")
+                        with c3:
+                            gset = db.get_product_groups(new_gender)
+                            gnames = [g['name'] for g in gset] or [pn['urun_grubu']]
+                            gidx = gnames.index(pn['urun_grubu']) if pn['urun_grubu'] in gnames else 0
+                            new_ug = st.selectbox("Ürün Grubu", gnames, index=gidx, key=f"pnu_{pn['id']}")
+                        if st.form_submit_button("💾 Kaydet"):
+                            db.update_product_name(pn['id'], new_name, new_gender, new_ug)
+                            st.success("Güncellendi!")
+                            st.rerun()
+                    if st.button("🗑️ Sil", key=f"del_pn_{pn['id']}"):
+                        db.delete_product_name(pn['id'])
+                        st.rerun()
+        else:
+            st.info("Henüz ürün adı tanımlanmamış.")
+
+    # --- Kumaşlar ---
+    with tab4:
+        product_names_all = db.get_product_names()
+        pn_names_display = ["—"] + [p['name'] for p in product_names_all]
         with st.form("add_fabric"):
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4, c5 = st.columns(5)
             with c1:
                 f_name = st.text_input("Kumaş Adı")
-                f_turu = st.selectbox("Kumaş Türü", FABRIC_TYPES)
             with c2:
-                f_icerik = st.text_input("İçerik", placeholder="ör. %95 Pamuk %5 Elastan")
-                f_en = st.number_input("En (cm)", min_value=0.0, value=0.0, step=1.0)
+                f_turu = st.selectbox("Tür", FABRIC_TYPES)
             with c3:
+                f_icerik = st.text_input("İçerik", placeholder="%95 Pamuk")
+            with c4:
+                f_en = st.number_input("En (cm)", min_value=0.0, value=0.0, step=1.0)
+            with c5:
                 f_grm2 = st.number_input("Gramaj (gr/m²)", min_value=0.0, value=0.0, step=1.0)
-                f_fiyat = st.number_input("Fiyat (kg başına)", min_value=0.0, value=0.0, step=1.0)
+            f_urun_adi = st.selectbox("Ürün Adı (opsiyonel)", pn_names_display)
             if st.form_submit_button("Ekle", width='stretch', type="primary"):
                 if f_name.strip():
-                    db.add_fabric(f_name.strip(), f_icerik.strip(), f_turu, f_en, f_grm2)
-                    fabrics_tmp = db.get_fabrics()
-                    new_fab = next((f for f in fabrics_tmp if f['name'] == f_name.strip()), None)
-                    if new_fab:
-                        conn = db.get_conn()
-                        conn.execute("UPDATE fabrics SET fiyat=? WHERE id=?", (f_fiyat, new_fab['id']))
-                        conn.commit(); conn.close()
+                    urun_adi_id = None
+                    if f_urun_adi != "—":
+                        rec = next((p for p in product_names_all if p['name'] == f_urun_adi), None)
+                        urun_adi_id = rec['id'] if rec else None
+                    db.add_fabric(f_name.strip(), f_icerik.strip(), f_turu, f_en, f_grm2, urun_adi_id)
                     st.success(f"'{f_name.strip()}' eklendi!")
                     st.rerun()
                 else:
@@ -1421,104 +1568,114 @@ def page_ayarlar():
         st.markdown("#### Mevcut Kumaşlar")
         fabrics = db.get_fabrics()
         if fabrics:
-            df = pd.DataFrame([{'Ad': f['name'], 'Tür': f['kumas_turu'], 'İçerik': f['icerik'],
-                                'En (cm)': f['en'], 'Gramaj (gr/m²)': f['gr_m2'],
-                                'Fiyat (kg)': f.get('fiyat', 0)} for f in fabrics])
-            st.dataframe(df, width='stretch', hide_index=True)
-            fsel = st.selectbox("Fiyat güncellenecek/silinecek kumaş", ["—"] + [f['name'] for f in fabrics])
-            if fsel != "—":
-                fid = next(f['id'] for f in fabrics if f['name'] == fsel)
-                cur_fiyat = next(f['fiyat'] for f in fabrics if f['id'] == fid)
-                c1, c2 = st.columns(2)
-                with c1:
-                    new_fiyat = st.number_input("Yeni Fiyat (kg başına)", min_value=0.0, value=float(cur_fiyat or 0), key="fab_new_fiyat")
-                    if st.button("💾 Fiyatı Güncelle"):
-                        conn = db.get_conn()
-                        conn.execute("UPDATE fabrics SET fiyat=? WHERE id=?", (new_fiyat, fid))
-                        conn.commit(); conn.close()
-                        st.success("Güncellendi!")
-                        st.rerun()
-                with c2:
-                    st.write("")
-                    st.write("")
-                    if st.button("🗑️ Seçili Kumaşı Sil"):
-                        db.delete_fabric(fid)
+            for f in fabrics:
+                with st.expander(f"{f['name']} ({f['kumas_turu']})"):
+                    with st.form(f"edit_fabric_master_{f['id']}"):
+                        c1, c2, c3, c4, c5 = st.columns(5)
+                        with c1:
+                            nname = st.text_input("Kumaş Adı", value=f['name'], key=f"fmn_{f['id']}")
+                        with c2:
+                            nturu = st.selectbox("Tür", FABRIC_TYPES, index=FABRIC_TYPES.index(f['kumas_turu']) if f['kumas_turu'] in FABRIC_TYPES else 0, key=f"fmt_{f['id']}")
+                        with c3:
+                            nicerik = st.text_input("İçerik", value=f['icerik'] or '', key=f"fmi_{f['id']}")
+                        with c4:
+                            nen = st.number_input("En (cm)", min_value=0.0, value=float(f['en'] or 0), key=f"fme_{f['id']}")
+                        with c5:
+                            ngrm2 = st.number_input("Gramaj", min_value=0.0, value=float(f['gr_m2'] or 0), key=f"fmg_{f['id']}")
+                        pn_idx = pn_names_display.index(f['urun_adi']) if f.get('urun_adi') in pn_names_display else 0
+                        n_urun_adi = st.selectbox("Ürün Adı", pn_names_display, index=pn_idx, key=f"fmu_{f['id']}")
+                        if st.form_submit_button("💾 Kaydet"):
+                            urun_adi_id = None
+                            if n_urun_adi != "—":
+                                rec = next((p for p in product_names_all if p['name'] == n_urun_adi), None)
+                                urun_adi_id = rec['id'] if rec else None
+                            db.update_fabric(f['id'], nname, nicerik, nturu, nen, ngrm2, urun_adi_id)
+                            st.success("Güncellendi!")
+                            st.rerun()
+                    if st.button("🗑️ Sil", key=f"del_fab_master_{f['id']}"):
+                        db.delete_fabric(f['id'])
                         st.rerun()
         else:
             st.info("Henüz kumaş tanımlanmamış.")
 
     # --- Lastikler ---
-    with tab4:
+    with tab5:
+        product_names_all = db.get_product_names()
+        pn_names_display = ["—"] + [p['name'] for p in product_names_all]
         with st.form("add_elastic"):
             c1, c2, c3 = st.columns(3)
             with c1:
-                e_tur = st.selectbox("Lastik Türü", ELASTIC_TYPES)
-                e_ad = st.text_input("Lastik Adı")
+                e_ad = st.selectbox("Lastik Adı", ELASTIC_TYPES)
             with c2:
-                e_boyut = st.text_input("Boyut", placeholder="ör. 2 cm")
-                e_fiyat = st.number_input("Fiyat (mt başına)", min_value=0.0, value=0.0, step=0.1)
+                e_boyut = st.text_input("Boyut", placeholder="2 cm")
             with c3:
-                all_groups = db.get_product_groups()
-                e_urun_grubu = st.selectbox("Model / Ürün Grubu (opsiyonel)",
-                                            ["—"] + [g['name'] for g in all_groups])
+                e_urun_adi = st.selectbox("Ürün Adı (opsiyonel)", pn_names_display)
             if st.form_submit_button("Ekle", width='stretch', type="primary"):
-                if e_ad.strip():
-                    db.add_elastic(e_tur, e_ad.strip(), e_boyut.strip(),
-                                   '' if e_urun_grubu == '—' else e_urun_grubu)
-                    elastics_tmp = db.get_elastics()
-                    new_el = next((e for e in elastics_tmp if e['ad'] == e_ad.strip() and e['tur'] == e_tur), None)
-                    if new_el:
-                        conn = db.get_conn()
-                        conn.execute("UPDATE elastics SET fiyat=? WHERE id=?", (e_fiyat, new_el['id']))
-                        conn.commit(); conn.close()
-                    st.success(f"'{e_ad.strip()}' eklendi!")
-                    st.rerun()
-                else:
-                    st.error("Lastik adı gerekli!")
+                urun_adi_id = None
+                if e_urun_adi != "—":
+                    rec = next((p for p in product_names_all if p['name'] == e_urun_adi), None)
+                    urun_adi_id = rec['id'] if rec else None
+                db.add_elastic(e_ad, e_boyut.strip(), urun_adi_id)
+                st.success(f"'{e_ad}' eklendi!")
+                st.rerun()
 
         st.markdown("---")
         st.markdown("#### Mevcut Lastikler")
         elastics = db.get_elastics()
         if elastics:
-            df = pd.DataFrame([{'Tür': e['tur'], 'Ad': e['ad'], 'Boyut': e['boyut'],
-                                'Fiyat (mt)': e.get('fiyat', 0),
-                                'Model/Ürün Grubu': e['urun_grubu'] or '—'} for e in elastics])
-            st.dataframe(df, width='stretch', hide_index=True)
-            esel = st.selectbox("Fiyat güncellenecek/silinecek lastik", ["—"] + [f"{e['tur']} - {e['ad']}" for e in elastics])
-            if esel != "—":
-                eid = next(e['id'] for e in elastics if f"{e['tur']} - {e['ad']}" == esel)
-                cur_fiyat = next(e['fiyat'] for e in elastics if e['id'] == eid)
-                c1, c2 = st.columns(2)
-                with c1:
-                    new_fiyat = st.number_input("Yeni Fiyat (mt başına)", min_value=0.0, value=float(cur_fiyat or 0), key="ela_new_fiyat")
-                    if st.button("💾 Fiyatı Güncelle"):
-                        conn = db.get_conn()
-                        conn.execute("UPDATE elastics SET fiyat=? WHERE id=?", (new_fiyat, eid))
-                        conn.commit(); conn.close()
-                        st.success("Güncellendi!")
-                        st.rerun()
-                with c2:
-                    st.write("")
-                    st.write("")
-                    if st.button("🗑️ Seçili Lastiği Sil"):
-                        db.delete_elastic(eid)
+            for e in elastics:
+                with st.expander(f"{e['tur']} — {e['boyut'] or '-'}"):
+                    with st.form(f"edit_elastic_master_{e['id']}"):
+                        c1, c2, c3 = st.columns(3)
+                        with c1:
+                            nad = st.selectbox("Lastik Adı", ELASTIC_TYPES,
+                                               index=ELASTIC_TYPES.index(e['tur']) if e['tur'] in ELASTIC_TYPES else 0,
+                                               key=f"emn_{e['id']}")
+                        with c2:
+                            nboyut = st.text_input("Boyut", value=e['boyut'] or '', key=f"emb_{e['id']}")
+                        with c3:
+                            pn_idx = pn_names_display.index(e['urun_adi']) if e.get('urun_adi') in pn_names_display else 0
+                            n_urun_adi = st.selectbox("Ürün Adı", pn_names_display, index=pn_idx, key=f"emu_{e['id']}")
+                        if st.form_submit_button("💾 Kaydet"):
+                            urun_adi_id = None
+                            if n_urun_adi != "—":
+                                rec = next((p for p in product_names_all if p['name'] == n_urun_adi), None)
+                                urun_adi_id = rec['id'] if rec else None
+                            db.update_elastic(e['id'], nad, nboyut, urun_adi_id)
+                            st.success("Güncellendi!")
+                            st.rerun()
+                    if st.button("🗑️ Sil", key=f"del_ela_master_{e['id']}"):
+                        db.delete_elastic(e['id'])
                         st.rerun()
         else:
             st.info("Henüz lastik tanımlanmamış.")
 
     # --- Reçeteler ---
-    with tab5:
-        st.caption("Cinsiyet + Ürün Grubu + Beden bazında kumaş (gr) ve lastik (adet/mt) reçetesi tanımlayın. "
+    with tab6:
+        st.caption("Cinsiyet + Ürün Grubu + Beden bazında kumaş (gr) ve lastik (adet/cm) reçetesi tanımlayın. "
                   "Yeni sipariş oluşturulurken bu değerler otomatik uygulanır.")
-        r_gender = st.radio("Cinsiyet", GENDERS, horizontal=True, key="recipe_gender")
+
+        # Düzenle butonundan gelen bekleyen seçim varsa, radio/selectbox oluşturulmadan ÖNCE uygula
+        pending = st.session_state.pop('_pending_recipe_edit', None)
+        if pending:
+            st.session_state['recipe_gender_edit'] = pending[0]
+            st.session_state['recipe_ug_edit'] = pending[1]
+
+        if 'recipe_gender_edit' not in st.session_state:
+            st.session_state['recipe_gender_edit'] = GENDERS[0]
+
+        r_gender = st.radio("Cinsiyet", GENDERS, horizontal=True, key="recipe_gender_edit")
         groups = db.get_product_groups(r_gender)
         if not groups:
             st.warning(f"Önce '{r_gender}' için Ürün Grupları sekmesinden bir ürün grubu ekleyin.")
         else:
-            r_urun_grubu = st.selectbox("Ürün Grubu", [g['name'] for g in groups], key="recipe_ug")
+            group_names = [g['name'] for g in groups]
+            if st.session_state.get('recipe_ug_edit') not in group_names:
+                st.session_state['recipe_ug_edit'] = group_names[0]
+            r_urun_grubu = st.selectbox("Ürün Grubu", group_names, key="recipe_ug_edit")
             existing = db.get_recipe(r_gender, r_urun_grubu)
 
-            with st.form(f"recipe_form_{r_gender}_{r_urun_grubu}"):
+            with st.form(f"recipe_form"):
                 st.markdown(f"**{r_gender} — {r_urun_grubu} reçetesi**")
                 size_vals = {}
                 cols = st.columns(7)
@@ -1529,12 +1686,12 @@ def page_ayarlar():
                                              step=1.0, key=f"rk_{size}")
                         la = st.number_input("Lastik (adet)", min_value=0.0, value=float(existing[size]['lastik_adet']),
                                              step=1.0, key=f"ra_{size}")
-                        lm = st.number_input("Lastik (mt)", min_value=0.0, value=float(existing[size]['lastik_mt']),
-                                             step=0.05, key=f"rm_{size}")
-                        size_vals[size] = (kg, la, lm)
+                        lc = st.number_input("Lastik (cm)", min_value=0.0, value=float(existing[size]['lastik_cm']),
+                                             step=1.0, key=f"rc_{size}")
+                        size_vals[size] = (kg, la, lc)
                 if st.form_submit_button("💾 Reçeteyi Kaydet", type="primary"):
-                    for size, (kg, la, lm) in size_vals.items():
-                        db.upsert_recipe(r_gender, r_urun_grubu, size, kg, la, lm)
+                    for size, (kg, la, lc) in size_vals.items():
+                        db.upsert_recipe(r_gender, r_urun_grubu, size, kg, la, lc)
                     db.add_log(st.session_state.user['id'], st.session_state.user['username'],
                               'Reçete Güncellendi', f"{r_gender} - {r_urun_grubu}")
                     st.success("Reçete kaydedildi!")
@@ -1545,50 +1702,51 @@ def page_ayarlar():
         recipe_groups = db.get_recipe_groups()
         if recipe_groups:
             for rg in recipe_groups:
-                with st.expander(f"{rg['gender']} — {rg['urun_grubu']}"):
-                    r = db.get_recipe(rg['gender'], rg['urun_grubu'])
-                    df = pd.DataFrame([{'Beden': s, 'Kumaş (gr)': r[s]['kumas_gr'],
-                                        'Lastik (adet)': r[s]['lastik_adet'], 'Lastik (mt)': r[s]['lastik_mt']}
-                                       for s in SIZES])
-                    st.dataframe(df, width='stretch', hide_index=True)
-                    if st.button("🗑️ Bu Reçeteyi Sil", key=f"delrec_{rg['gender']}_{rg['urun_grubu']}"):
+                c1, c2, c3 = st.columns([3, 1, 1])
+                with c1:
+                    st.markdown(f"**{rg['gender']} — {rg['urun_grubu']}**")
+                with c2:
+                    if st.button("✏️ Düzenle", key=f"editrec_{rg['gender']}_{rg['urun_grubu']}"):
+                        st.session_state['_pending_recipe_edit'] = (rg['gender'], rg['urun_grubu'])
+                        st.rerun()
+                with c3:
+                    if st.button("🗑️ Sil", key=f"delrec_{rg['gender']}_{rg['urun_grubu']}"):
                         db.delete_recipe_group(rg['gender'], rg['urun_grubu'])
                         st.rerun()
+                r = db.get_recipe(rg['gender'], rg['urun_grubu'])
+                df = pd.DataFrame([{'Beden': s, 'Kumaş (gr)': r[s]['kumas_gr'],
+                                    'Lastik (adet)': r[s]['lastik_adet'], 'Lastik (cm)': r[s]['lastik_cm']}
+                                   for s in SIZES])
+                st.dataframe(df, width='stretch', hide_index=True)
+                st.markdown("---")
         else:
             st.info("Henüz reçete tanımlanmamış.")
 
-    # --- Kur & Firma ---
-    with tab6:
+    # --- Firma ---
+    with tab7:
         settings = db.get_settings()
         with st.form("settings_form"):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                usd_kur = st.number_input("USD Kur (₺)", min_value=0.0, value=float(settings['usd_kur']), step=0.1)
-                eur_kur = st.number_input("EUR Kur (₺)", min_value=0.0, value=float(settings['eur_kur']), step=0.1)
-            with c2:
-                varsayilan_para = st.selectbox("Varsayılan Para Birimi", CURRENCIES,
-                                               index=CURRENCIES.index(settings['varsayilan_para']))
-                firma_adi = st.text_input("Firma Adı", value=settings['firma_adi'])
-            with c3:
-                barkod_prefix = st.text_input("Barkod / Model Kodu Öneki", value=settings['barkod_prefix'])
-                st.caption("Model kodu şu formatta oluşturulur: PREFIX-001-RENK")
-            if st.form_submit_button("💾 Ayarları Kaydet", type="primary"):
-                db.update_settings(usd_kur, eur_kur, varsayilan_para, firma_adi.strip(), barkod_prefix.strip())
+            firma_adi = st.text_input("Firma Adı", value=settings['firma_adi'])
+            if st.form_submit_button("💾 Kaydet", type="primary"):
+                db.update_settings(firma_adi.strip())
                 db.add_log(st.session_state.user['id'], st.session_state.user['username'],
-                          'Ayarlar Güncellendi', 'Kur ve firma bilgileri')
+                          'Ayarlar Güncellendi', 'Firma adı')
                 st.success("Kaydedildi!")
                 st.rerun()
 
     # --- Kullanıcılar ---
-    with tab7:
+    with tab8:
         with st.form("add_user"):
-            col1, col2 = st.columns(2)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 new_username = st.text_input("Kullanıcı Adı")
-                new_fullname = st.text_input("Ad Soyad")
             with col2:
+                new_fullname = st.text_input("Ad Soyad")
+            with col3:
                 new_password = st.text_input("Şifre", type="password")
+            with col4:
                 new_role = st.selectbox("Yetki", ["user", "admin"])
+
             submitted = st.form_submit_button("Kullanıcı Ekle", width='stretch', type="primary")
             if submitted:
                 if new_username.strip() and new_password and new_fullname.strip():
@@ -1657,7 +1815,7 @@ def page_ayarlar():
                     st.error("Mevcut şifre yanlış!")
 
     # --- Log ---
-    with tab8:
+    with tab9:
         logs = db.get_logs(200)
         if logs:
             log_data = [{
@@ -1669,6 +1827,102 @@ def page_ayarlar():
             st.dataframe(pd.DataFrame(log_data), width='stretch', hide_index=True)
         else:
             st.info("Henüz log kaydı yok.")
+
+
+# ======================================================================
+# EXCEL İŞLEMLERİ & YEDEKLEME
+# ======================================================================
+def page_excel_yedek():
+    page_header("📤 Excel İşlemleri & Yedekleme", "Toplu dışa/içe aktarma ve tam sistem yedeği")
+
+    if not HAS_EXCEL:
+        st.warning("Excel desteği için `openpyxl` kütüphanesi kurulu değil.")
+
+    st.markdown("### 📥 Siparişleri Excel Olarak İndir")
+    orders = db.get_orders_overview(assigned=None, include_completed=True)
+    if orders and HAS_EXCEL:
+        rows = []
+        for o in orders:
+            row = {
+                'ID': o['id'], 'Ürün Adı': o['model_name'], 'Cinsiyet': o['gender'], 'Ürün Grubu': o.get('urun_grubu'),
+                'Üretici': o.get('manufacturer_name') or '-', 'Durum': o['status'],
+                'Sipariş Tarihi': tr_date(o.get('siparis_tarihi')), 'Termin': tr_date(o.get('deadline')),
+                'Paket': o['package_size'], 'Toplam Kutu': o['total_boxes'], 'Toplam Adet': o['total_quantity'],
+                'Kumaş (kg)': o['kumas_kg_total'], 'Lastik (cm)': o['lastik_cm_total'],
+                'Lastik (adet-Raporlu)': o['lastik_adet_total'],
+            }
+            for s in o['sizes']:
+                row[f"Adet_{s['size']}"] = s['box_qty'] * o['package_size']
+            rows.append(row)
+        df = pd.DataFrame(rows)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False)
+        st.download_button("📥 Tüm Siparişleri Excel İndir", output.getvalue(),
+                          file_name=f"siparisler_{date.today().isoformat()}.xlsx",
+                          mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    elif not orders:
+        st.info("Henüz sipariş yok.")
+
+    st.markdown("---")
+    st.markdown("### 📤 Excel'den Toplu Sipariş Yükle")
+    st.caption("Excel dosyanızda en az şu kolonlar bulunmalı: Ürün Adı, Cinsiyet, Ürün Grubu, Paket, Adet_XS...Adet_3XL. "
+              "Yüklenen siparişler reçete kütüphanesine göre otomatik hesaplanarak 'Planlama Bekleyen' listesine eklenir.")
+    uploaded = st.file_uploader("Excel Dosyası (.xlsx)", type=['xlsx'])
+    if uploaded and HAS_EXCEL:
+        try:
+            df_up = pd.read_excel(uploaded)
+            st.dataframe(df_up.head(10), width='stretch')
+            st.info(f"{len(df_up)} satır bulundu.")
+            if st.button("✅ İçe Aktar"):
+                success_count = 0
+                for _, row in df_up.iterrows():
+                    try:
+                        gender = str(row.get('Cinsiyet', 'Kadın'))
+                        urun_grubu = str(row.get('Ürün Grubu', ''))
+                        package_size = int(row.get('Paket', 1) or 1)
+                        recipe = db.get_recipe(gender, urun_grubu)
+                        sizes_payload = []
+                        for size in SIZES:
+                            col = f"Adet_{size}"
+                            adet = int(row.get(col, 0) or 0)
+                            box_qty = adet // package_size if package_size else adet
+                            if box_qty > 0:
+                                r = recipe.get(size, {'kumas_gr': 0, 'lastik_adet': 0, 'lastik_cm': 0})
+                                sizes_payload.append({'size': size, 'box_qty': box_qty, **r})
+                        if not sizes_payload:
+                            continue
+                        db.add_order(str(row.get('Ürün Adı', 'Yeni Model')), gender, urun_grubu, package_size,
+                                    3.0, 3.0, str(row.get('Termin', date.today().isoformat())),
+                                    date.today().isoformat(), sizes_payload,
+                                    [{}], [{}], [], st.session_state.user['id'])
+                        success_count += 1
+                    except Exception as e:
+                        st.warning(f"Satır atlandı: {e}")
+                db.add_log(st.session_state.user['id'], st.session_state.user['username'],
+                          'Excel İçe Aktarma', f"{success_count} sipariş eklendi")
+                st.success(f"{success_count} sipariş içe aktarıldı!")
+                st.rerun()
+        except Exception as e:
+            st.error(f"Excel okuma hatası: {e}")
+
+    st.markdown("---")
+    st.markdown("### 💾 Tüm Verileri Yedekle (Zip)")
+    st.caption("Tüm veritabanı tablolarını JSON olarak ve yüklenmiş fotoğrafları içeren bir zip dosyası indirin.")
+    if st.button("💾 Yedek Zip Oluştur"):
+        data = db.export_all_data()
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as z:
+            for table, table_rows in data.items():
+                z.writestr(f"data/{table}.json", json.dumps(table_rows, ensure_ascii=False, indent=2, default=str))
+            if os.path.isdir(UPLOAD_DIR):
+                for fname in os.listdir(UPLOAD_DIR):
+                    fpath = os.path.join(UPLOAD_DIR, fname)
+                    if os.path.isfile(fpath):
+                        z.write(fpath, arcname=f"uploads/{fname}")
+        zip_buffer.seek(0)
+        st.download_button("⬇️ Zip İndir", zip_buffer.getvalue(),
+                          file_name=f"paulkenzie_yedek_{date.today().isoformat()}.zip", mime="application/zip")
 
 
 # ======================================================================
@@ -1714,7 +1968,6 @@ def main():
             reset_wizard()
             st.rerun()
 
-    # Sipariş düzenleme, seçilen sayfa ne olursa olsun önceliklidir (ayrı sayfa gibi davranır)
     if st.session_state.edit_order_id and user['role'] == 'admin':
         page_order_edit(st.session_state.edit_order_id)
         return

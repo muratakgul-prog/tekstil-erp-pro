@@ -1,14 +1,15 @@
-[theme]
-primaryColor = "#1e3a8a"
-backgroundColor = "#f4f6fa"
-secondaryBackgroundColor = "#ffffff"
-textColor = "#0f172a"
-font = "sans serif"
+# Veritabanı ve yüklenen dosyalar (her ortamda yeniden oluşur)
+app_data.db
+app_data.db-journal
+app_data.db-wal
+app_data.db-shm
+uploads/
 
-[server]
-headless = true
-enableXsrfProtection = true
-maxUploadSize = 25
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
 
-[browser]
-gatherUsageStats = false
+# OS
+.DS_Store

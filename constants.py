@@ -9,8 +9,9 @@ GENDERS = ['Kadın', 'Erkek']
 # Kutu içi (paket) adedi seçenekleri
 PACKAGE_SIZES = [1, 3, 5, 7, 10]
 
-# Lastik çeşitleri
-ELASTIC_TYPES = ['Baskılı', 'Jakarlı', 'Raporlu']
+# Lastik adları (artık tür yerine doğrudan lastik adı olarak kullanılıyor)
+ELASTIC_TYPES = ['Baskılı Lastik', 'Jakarlı Lastik', 'Raporlu Lastik']
+RAPORLU_LASTIK = 'Raporlu Lastik'
 
 # Kumaş türleri
 FABRIC_TYPES = ['Örme', 'Dokuma']
